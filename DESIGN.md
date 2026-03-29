@@ -60,7 +60,9 @@ graph LR
 | **plan** | Agent + Human | `docs/<epic>/PLAN.md` | `plan-approved` label (human) |
 | **decompose** | Agent | Beads features + tasks | Tasks exist with `assignee:worker` |
 | **work** | Workers (background) | Code changes, test results | All tasks closed |
-| **evaluate** | Critic (fresh session) | `[critic]` comment on epic | `critic-satisfied` label |
+| **evaluate** | Critic (fresh session) | `[critic]` comment on epic | `critic-satisfied` label (requires all tasks done) |
+
+One directory = one epic. When an epic completes and you want to add more work, reopen it (`bd reopen`) — don't create a new one. On reopen, the extension strips stale `critic-satisfied` so the evaluation gate isn't bypassed.
 
 ### Why Research First
 
@@ -202,6 +204,7 @@ What it watches:
 - Label changes (stuck, claim:N, critic-satisfied)
 - Worker process exits (via pi-processes alerts)
 - Epic-level state (iteration, phase)
+- Epic reopen (closed → open) — strips stale `critic-satisfied` label and refreshes widgets
 
 What it does NOT do:
 - Evaluate work quality (that's the agent's job)
@@ -251,15 +254,24 @@ Worker spawning details:
 
 #### 3. Tool Gates (`index.ts`)
 
-Intercepts executor/ralph script calls and redirects to extension.
+Intercepts commands via `tool_call` event handlers and blocks violations with actionable error messages. Currently enforces 8 gates:
 
-```typescript
-// Blocked patterns
-"beads-executor.sh"  → "Use /beads:run to spawn workers"
-"ralph.sh"           → "Use /beads:run to spawn workers and /beads:evaluate for evaluation"
-```
+| # | Gate | Trigger | Block Reason |
+|---|------|---------|-------------|
+| 1 | Script redirect | `beads-executor.sh` in bash | Use `/beads:run` instead |
+| 2 | Script redirect | `ralph.sh` in bash | Use extension commands instead |
+| 3 | Epic-first | `bd create` without `-t epic` when no epic exists | Create an epic first |
+| 4 | Single epic | `bd create -t epic` when epic exists | One epic per directory — reopen if closed |
+| 5 | Critic gate | `bd close <epic>` without `critic-satisfied` + all tasks done | Spawn critic via `/beads:evaluate` first |
+| 6 | Critic integrity | `bd label add ... critic-satisfied` | Only the critic session can add this label |
+| 7 | Plan approval | `bd label add ... plan-approved` without human approval | Human must run `/beads:approve` |
+| 8 | No direct work | `write` or `edit` on non-docs files during work phase | Orchestrator can't write code — spawn a worker |
 
-This is a hard block via `tool_call` event handler. The agent sees the block reason and learns the correct alternative. The skills don't need modification — the extension overrides at the pi level.
+Gates 5 and 6 provide defense in depth: the orchestrator can't close without critic evaluation (gate 5), and can't bypass that by self-labeling `critic-satisfied` (gate 6). The close gate also requires `allTasksDone AND criticSatisfied` — a stale label from a prior iteration can't bypass the gate while new tasks are open.
+
+Gate 4 handles the epic lifecycle: if the epic is closed, the error message guides the agent to `bd reopen` + `bd update --title` instead of creating a new epic.
+
+Skills don't need modification — the extension overrides at the pi level.
 
 #### 4. Context Injection (`index.ts`)
 
@@ -541,7 +553,7 @@ Items for a follow-up agent to pick up. Ordered roughly by impact.
 ### P0 — Test & Harden
 
 - [ ] End-to-end test: create epic, run through all phases, verify widget updates at each transition
-- [ ] Test tool gates: confirm `beads-executor.sh` and `ralph.sh` are blocked with correct redirect messages
+- [ ] Test tool gates: confirm all 8 gates fire correctly (script redirects, epic-first, single epic/reopen, critic gate, critic integrity, plan approval, no direct work)
 - [ ] Test poller: verify notifications fire on task completion, stuck detection, human gate changes
 - [ ] Test critic spawn: verify fresh session has no prior context, writes `[critic]` comment, exits cleanly
 - [ ] Handle edge cases: no `.beads/` dir, `bd` not installed, epic with no tasks, worker crash mid-task
