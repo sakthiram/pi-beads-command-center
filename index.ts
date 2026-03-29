@@ -56,6 +56,7 @@ export default function (pi: ExtensionAPI) {
   const settings = loadSettings();
   let poller: Poller | null = null;
   let activeEpicId: string | null = null;
+  let widgetCtx: any = null;
 
   // ─── Context Injection ───────────────────────────────────────────────────
 
@@ -88,28 +89,14 @@ export default function (pi: ExtensionAPI) {
   // ─── Session Lifecycle ───────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    widgetCtx = ctx;
     const beadsDir = path.join(process.cwd(), ".beads");
     if (!fs.existsSync(beadsDir)) return;
 
     const epic = findActiveEpic();
     if (epic) {
       activeEpicId = epic.id;
-
-      // Immediate initial render before poller starts
-      const state = getEpicState(epic.id);
-      if (state) {
-        const counts = countTasks(state.tasks);
-        ctx.ui.setStatus("beads", renderStatusLine(state, counts, settings.maxIterations));
-        ctx.ui.setWidget("beads-pipeline", (_tui: any, _theme: any) => {
-          const lines = renderPhasePipeline(state, counts, 80);
-          return { render: () => lines, invalidate: () => {} };
-        });
-        const gateLines = renderHumanGateWidget(state.humanGates);
-        if (gateLines.length > 0) {
-          ctx.ui.setWidget("beads-gates", gateLines, { placement: "belowEditor" });
-        }
-      }
-
+      updateWidgets(epic.id);
       startPoller(ctx);
       ctx.ui.notify(`Beads command center: tracking ${epic.title}`, "info");
     } else {
@@ -119,71 +106,89 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Poller Setup ────────────────────────────────────────────────────────
 
+  // ─── Widget Update ─────────────────────────────────────────────────────
+
+  function updateWidgets(epicId?: string) {
+    if (!widgetCtx) return;
+    const id = epicId || activeEpicId;
+    if (!id) return;
+
+    const state = getEpicState(id);
+    if (!state) return;
+
+    const counts = countTasks(state.tasks);
+    const width = process.stdout.columns || 80;
+
+    // Status line
+    widgetCtx.ui.setStatus("beads", renderStatusLine(state, counts, settings.maxIterations));
+
+    // Phase pipeline widget (above editor)
+    const pipelineLines = renderPhasePipeline(state, counts, width);
+    widgetCtx.ui.setWidget("beads-pipeline", pipelineLines);
+
+    // Human gate widget (below editor)
+    const gateLines = renderHumanGateWidget(state.humanGates);
+    if (gateLines.length > 0) {
+      widgetCtx.ui.setWidget("beads-gates", gateLines, { placement: "belowEditor" });
+    } else {
+      widgetCtx.ui.setWidget("beads-gates", undefined);
+    }
+  }
+
+  // ─── Poller Setup ────────────────────────────────────────────────────────
+
   function startPoller(ctx: any) {
     if (poller) poller.stop();
 
     poller = new Poller(
       {
         onTaskCompleted(taskId, title) {
-          ctx.ui.notify(`✓ ${title} (${taskId}) completed`, "info");
+          widgetCtx?.ui.notify(`✓ ${title} (${taskId}) completed`, "info");
+          updateWidgets();
         },
         onAllTasksDone(epicId) {
-          ctx.ui.notify(
+          widgetCtx?.ui.notify(
             `🎯 All tasks done for ${epicId}! Run /beads:evaluate to spawn a fresh critic session.`,
             "info"
           );
+          updateWidgets();
         },
         onTaskStuck(taskId, title) {
-          ctx.ui.notify(`✗ ${title} (${taskId}) stuck — needs attention`, "warning");
+          widgetCtx?.ui.notify(`✗ ${title} (${taskId}) stuck — needs attention`, "warning");
+          updateWidgets();
         },
         onHumanGateAdded(description) {
-          ctx.ui.notify(`⚠ ${description}`, "warning");
+          widgetCtx?.ui.notify(`⚠ ${description}`, "warning");
+          updateWidgets();
         },
-        onHumanGateResolved() {},
+        onHumanGateResolved() {
+          updateWidgets();
+        },
         onPhaseChanged(phase, iteration) {
-          ctx.ui.notify(`Phase: ${phase} (iteration ${iteration})`, "info");
+          widgetCtx?.ui.notify(`Phase: ${phase} (iteration ${iteration})`, "info");
+          updateWidgets();
         },
         onEpicCompleted(epicId) {
-          ctx.ui.notify(`🟢 Epic ${epicId} complete!`, "info");
-          ctx.ui.setStatus("beads", "beads: ✓ complete");
-          ctx.ui.setWidget("beads-pipeline", undefined);
-          ctx.ui.setWidget("beads-gates", undefined);
+          widgetCtx?.ui.notify(`🟢 Epic ${epicId} complete!`, "info");
+          widgetCtx?.ui.setStatus("beads", "beads: ✓ complete");
+          widgetCtx?.ui.setWidget("beads-pipeline", undefined);
+          widgetCtx?.ui.setWidget("beads-gates", undefined);
         },
         onCriticDone(epicId, satisfied, lastCritic, iteration) {
           if (satisfied) {
-            ctx.ui.notify(`🟢 Critic satisfied! All criteria pass. Epic ${epicId} is done.`, "info");
+            widgetCtx?.ui.notify(`🟢 Critic satisfied! All criteria pass. Epic ${epicId} is done.`, "info");
           } else {
-            ctx.ui.notify(
+            widgetCtx?.ui.notify(
               `🔴 Critic failed (iteration ${iteration}): ${lastCritic.slice(0, 100)}`,
               "warning"
             );
             const prompt = REMEDIATE_PROMPT(epicId, lastCritic, String(iteration));
-            ctx.ui.setEditorText(prompt);
+            widgetCtx?.ui.setEditorText(prompt);
           }
+          updateWidgets();
         },
-        onStateChanged(state, counts) {
-          // Status line
-          ctx.ui.setStatus(
-            "beads",
-            renderStatusLine(state, counts, settings.maxIterations)
-          );
-
-          // Phase pipeline widget (above editor)
-          ctx.ui.setWidget("beads-pipeline", (_tui: any, _theme: any) => {
-            const lines = renderPhasePipeline(state, counts, 80);
-            return {
-              render: () => lines,
-              invalidate: () => {},
-            };
-          });
-
-          // Human gate widget (below editor)
-          const gateLines = renderHumanGateWidget(state.humanGates);
-          if (gateLines.length > 0) {
-            ctx.ui.setWidget("beads-gates", gateLines, { placement: "belowEditor" });
-          } else {
-            ctx.ui.setWidget("beads-gates", undefined);
-          }
+        onStateChanged(_state, _counts) {
+          updateWidgets();
         },
       },
       settings.pollInterval,
