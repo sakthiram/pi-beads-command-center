@@ -111,6 +111,11 @@ export class Poller {
           this.callbacks.onEpicCompleted(state.epic.id);
         }
 
+        // Epic reopen — status changed back from closed to open
+        if (prev.epic.status === "closed" && state.epic.status !== "closed") {
+          this.callbacks.onStateChanged(state, counts);
+        }
+
         // Critic done detection (new critic comment appeared)
         if (state.lastCritic && state.lastCritic !== prev.lastCritic) {
           this.callbacks.onCriticDone(
