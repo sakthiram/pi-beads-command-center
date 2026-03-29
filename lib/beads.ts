@@ -211,7 +211,7 @@ function taskFromBd(raw: any): BeadsTask {
   return {
     id: raw.id || raw.ID || "",
     title: raw.title || raw.Title || "",
-    type: raw.type || raw.Type || "task",
+    type: raw.issue_type || raw.type || raw.Type || "task",
     status: raw.status || raw.Status || "open",
     labels: raw.labels || raw.Labels || [],
     parent: raw.parent || raw.Parent || undefined,

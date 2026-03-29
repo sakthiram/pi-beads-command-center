@@ -94,8 +94,24 @@ export default function (pi: ExtensionAPI) {
     const epic = findActiveEpic();
     if (epic) {
       activeEpicId = epic.id;
+
+      // Immediate initial render before poller starts
+      const state = getEpicState(epic.id);
+      if (state) {
+        const counts = countTasks(state.tasks);
+        ctx.ui.setStatus("beads", renderStatusLine(state, counts, settings.maxIterations));
+        ctx.ui.setWidget("beads-pipeline", (_tui: any, _theme: any) => {
+          const lines = renderPhasePipeline(state, counts, 80);
+          return { render: () => lines, invalidate: () => {} };
+        });
+        const gateLines = renderHumanGateWidget(state.humanGates);
+        if (gateLines.length > 0) {
+          ctx.ui.setWidget("beads-gates", gateLines, { placement: "belowEditor" });
+        }
+      }
+
       startPoller(ctx);
-      ctx.ui.notify(`Beads dashboard: tracking ${epic.title}`, "info");
+      ctx.ui.notify(`Beads command center: tracking ${epic.title}`, "info");
     } else {
       ctx.ui.setStatus("beads", "beads: no active epic");
     }

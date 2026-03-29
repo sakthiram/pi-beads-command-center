@@ -123,10 +123,11 @@ export class Poller {
         }
       }
 
-      // Always fire state changed if counts differ
+      // Always fire state changed on first poll or when counts differ
       if (!prevCounts || counts.done !== prevCounts.done ||
           counts.inProgress !== prevCounts.inProgress ||
-          counts.stuck !== prevCounts.stuck) {
+          counts.stuck !== prevCounts.stuck ||
+          counts.total !== prevCounts.total) {
         this.callbacks.onStateChanged(state, counts);
       }
 
