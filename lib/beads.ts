@@ -41,7 +41,7 @@ export interface HumanGate {
 
 // ─── BD CLI Wrapper ──────────────────────────────────────────────────────────
 
-function bd(args: string, cwd?: string): string {
+export function bd(args: string, cwd?: string): string {
   try {
     const result = execSync(`bd ${args} --no-daemon`, {
       encoding: "utf-8",
@@ -94,16 +94,16 @@ export function getEpicState(epicId: string, cwd?: string): EpicState | null {
   const stuck = labels.includes("stuck");
 
   // Features and tasks
-  const features = bdJson(`list --parent ${epicId} -t feature`, cwd).map(taskFromBd);
+  const features = bdJson(`list --parent ${epicId} -t feature --all`, cwd).map(taskFromBd);
   const allTasks: BeadsTask[] = [];
 
   // Direct tasks under epic
-  const directTasks = bdJson(`list --parent ${epicId} -t task`, cwd).map(taskFromBd);
+  const directTasks = bdJson(`list --parent ${epicId} -t task --all`, cwd).map(taskFromBd);
   allTasks.push(...directTasks);
 
   // Tasks under features
   for (const feature of features) {
-    const featureTasks = bdJson(`list --parent ${feature.id} -t task`, cwd).map(taskFromBd);
+    const featureTasks = bdJson(`list --parent ${feature.id} -t task --all`, cwd).map(taskFromBd);
     allTasks.push(...featureTasks);
   }
 

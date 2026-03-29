@@ -4,7 +4,6 @@ import type { EpicState, TaskCounts, HumanGate } from "../lib/beads.js";
 
 export const PHASES = [
   "research",
-  "purpose",
   "plan",
   "decompose",
   "work",
@@ -26,9 +25,8 @@ export function resolvePhases(state: EpicState, counts: TaskCounts): PhaseState[
   const labels = state.epic.labels;
 
   const hasResearch = labels.includes("research-done");
-  const hasPurpose = labels.includes("purpose-done") || labels.includes("plan-approved");
-  const hasPlan = labels.includes("plan-approved");
   const hasDecompose = counts.total > 0;
+  const hasPlan = labels.includes("plan-approved") || hasDecompose;
   const allTasksDone = counts.total > 0 && counts.done === counts.total;
   const hasInProgress = counts.inProgress > 0;
   const isStuck = state.stuck;
@@ -45,21 +43,13 @@ export function resolvePhases(state: EpicState, counts: TaskCounts): PhaseState[
     phases.push({ phase: "research", status: "done" }); // skipped = done
   }
 
-  // Purpose
-  if (hasPurpose || hasPlan) {
-    phases.push({ phase: "purpose", status: "done" });
-  } else if (hasResearch) {
-    phases.push({ phase: "purpose", status: "active" });
-  } else {
-    phases.push({ phase: "purpose", status: "blocked" });
-  }
-
   // Plan
   if (hasPlan) {
     phases.push({ phase: "plan", status: "done" });
+  } else if (hasResearch) {
+    phases.push({ phase: "plan", status: "active" });
   } else {
-    const purposeDone = phases.find((p) => p.phase === "purpose")?.status === "done";
-    phases.push({ phase: "plan", status: purposeDone ? "active" : "blocked" });
+    phases.push({ phase: "plan", status: "blocked" });
   }
 
   // Decompose — done if tasks exist AND (work started or all done)

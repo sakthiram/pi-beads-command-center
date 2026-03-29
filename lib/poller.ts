@@ -88,10 +88,9 @@ export class Poller {
           this.callbacks.onPhaseChanged(state.phase, state.iteration);
         }
 
-        // All tasks done detection
+        // All tasks done detection — only fire if previous poll had incomplete tasks
         if (counts.total > 0 && counts.done === counts.total) {
-          const prevCounts = this.lastCounts;
-          if (!prevCounts || prevCounts.done < prevCounts.total) {
+          if (prevCounts && prevCounts.total > 0 && prevCounts.done < prevCounts.total) {
             this.callbacks.onAllTasksDone(state.epic.id);
           }
         }

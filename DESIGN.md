@@ -601,3 +601,4 @@ Items for a follow-up agent to pick up. Ordered roughly by impact.
 - [ ] **Diff report** — Show what files changed across all tasks in the epic
 - [ ] **Time tracking** — Record phase durations, task durations, iteration counts. Surface in `/beads` overlay.
 - [ ] **Export** — `/beads:export` generates a standalone markdown report of the epic for sharing
+- [ ] **Widget background color** — Custom render object with ANSI bg codes has no visible effect. Investigate pi TUI widget rendering pipeline.

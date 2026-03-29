@@ -1,10 +1,10 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
-import { Container, Text, DynamicBorder, visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
+import { Box, Container, Text, DynamicBorder, visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { findActiveEpic, getEpicState, getReadyTasks, getTaskComments, countTasks } from "./lib/beads.js";
+import { bd, findActiveEpic, getEpicState, getReadyTasks, getTaskComments, countTasks } from "./lib/beads.js";
 import { Poller } from "./lib/poller.js";
 import {
   renderStatusLine,
@@ -23,6 +23,7 @@ interface Settings {
   maxConcurrentWorkers: number;
   workerTimeout: number; // seconds, 0 = no timeout
   autoAdvance: boolean;
+  strictPlanApproval: boolean;
   workerModel: string | null;
   criticModel: string | null;
   workerSkills: string[];
@@ -35,6 +36,7 @@ const DEFAULT_SETTINGS: Settings = {
   maxConcurrentWorkers: 3,
   workerTimeout: 0,
   autoAdvance: false,
+  strictPlanApproval: true,
   workerModel: null,
   criticModel: null,
   workerSkills: ["sakthisi-beads"],
@@ -57,6 +59,7 @@ export default function (pi: ExtensionAPI) {
   let poller: Poller | null = null;
   let activeEpicId: string | null = null;
   let widgetCtx: any = null;
+  let planApprovedByHuman = false;
 
   // ─── Context Injection ───────────────────────────────────────────────────
 
@@ -82,6 +85,25 @@ export default function (pi: ExtensionAPI) {
           block: true,
           reason: "ralph.sh is replaced by the beads-command-center extension. The main agent session handles the decompose→work→evaluate loop. Use /beads:run to spawn workers and /beads:evaluate to spawn a critic.",
         };
+      }
+
+      // Enforce epic creation rules:
+      // 1. First bd create must be -t epic
+      // 2. Non-epic creates require an active epic (to parent under)
+      if (cmd.includes("bd create")) {
+        const isEpicCreate = cmd.includes("-t epic");
+        if (!isEpicCreate && !activeEpicId) {
+          return {
+            block: true,
+            reason: "No active epic found. Create an epic first with: bd create \"<title>\" -t epic --no-daemon. Tasks and features must be children of an epic.",
+          };
+        }
+        if (isEpicCreate && activeEpicId) {
+          return {
+            block: true,
+            reason: `An epic is already active (${activeEpicId}). Only one epic per session. Create tasks/features under the existing epic instead.`,
+          };
+        }
       }
     }
   });
@@ -118,13 +140,27 @@ export default function (pi: ExtensionAPI) {
       const cmd = event.input.command || "";
 
       // Block closing epic without critic evaluation
-      if (cmd.includes("bd close") && cmd.includes(activeEpicId)) {
-        if (!state.criticSatisfied && counts.total > 0) {
+      // Child tasks have IDs like "epic-id.1", so check the cmd has the exact epic ID (not a subtask)
+      if (cmd.includes("bd close")) {
+        const closesEpic = cmd.split(/\s+/).some((arg) => arg === activeEpicId);
+        if (closesEpic && !state.criticSatisfied && counts.total > 0) {
           return {
             block: true,
             reason: "Cannot close epic without critic evaluation. Run /beads:evaluate to spawn a fresh, unbiased critic session first. The critic must add the critic-satisfied label before the epic can be closed.",
           };
         }
+      }
+
+      // Block agent from self-approving plan (unless human triggered via /beads:approve)
+      if (settings.strictPlanApproval && cmd.includes("plan-approved") && cmd.includes("bd label add")) {
+        if (!state.epic.labels.includes("plan-approved") && !planApprovedByHuman) {
+          return {
+            block: true,
+            reason: "Plan approval requires human confirmation. The human must run /beads:approve to approve the plan. Present the plan and wait for approval.",
+          };
+        }
+        // Reset flag after it's been used once
+        planApprovedByHuman = false;
       }
     }
 
@@ -149,8 +185,44 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Session Lifecycle ───────────────────────────────────────────────────
 
+  // Mutable state for widget rendering
+  let currentPipelineLines: string[] = [];
+  let currentGateLines: string[] = [];
+
   pi.on("session_start", async (_event, ctx) => {
     widgetCtx = ctx;
+
+    // Register widgets once — they read from mutable state
+    ctx.ui.setWidget("beads-pipeline", (_tui: any, _theme: any) => {
+      return {
+        render(w: number): string[] {
+          if (currentPipelineLines.length === 0) return [];
+          return currentPipelineLines.map((line: string) => {
+            const truncated = truncateToWidth(line, w - 2);
+            const visible = visibleWidth(truncated);
+            const pad = Math.max(0, w - visible - 1);
+            return `\x1b[48;2;30;30;50m ${truncated}${" ".repeat(pad)}\x1b[49m`;
+          });
+        },
+        invalidate() {},
+      };
+    });
+
+    ctx.ui.setWidget("beads-gates", (_tui: any, _theme: any) => {
+      return {
+        render(w: number): string[] {
+          if (currentGateLines.length === 0) return [];
+          return currentGateLines.map((line: string) => {
+            const truncated = truncateToWidth(line, w - 2);
+            const visible = visibleWidth(truncated);
+            const pad = Math.max(0, w - visible - 1);
+            return `\x1b[48;2;50;35;10m ${truncated}${" ".repeat(pad)}\x1b[49m`;
+          });
+        },
+        invalidate() {},
+      };
+    }, { placement: "belowEditor" });
+
     const beadsDir = path.join(process.cwd(), ".beads");
     if (!fs.existsSync(beadsDir)) return;
 
@@ -182,16 +254,10 @@ export default function (pi: ExtensionAPI) {
     widgetCtx.ui.setStatus("beads", renderStatusLine(state, counts, settings.maxIterations));
 
     // Phase pipeline widget (above editor)
-    const pipelineLines = renderPhasePipeline(state, counts, width);
-    widgetCtx.ui.setWidget("beads-pipeline", pipelineLines);
+    currentPipelineLines = renderPhasePipeline(state, counts, width);
 
     // Human gate widget (below editor)
-    const gateLines = renderHumanGateWidget(state.humanGates);
-    if (gateLines.length > 0) {
-      widgetCtx.ui.setWidget("beads-gates", gateLines, { placement: "belowEditor" });
-    } else {
-      widgetCtx.ui.setWidget("beads-gates", undefined);
-    }
+    currentGateLines = renderHumanGateWidget(state.humanGates);
   }
 
   // ─── Poller Setup ────────────────────────────────────────────────────────
@@ -207,10 +273,15 @@ export default function (pi: ExtensionAPI) {
         },
         onAllTasksDone(epicId) {
           widgetCtx?.ui.notify(
-            `🎯 All tasks done for ${epicId}! Run /beads:evaluate to spawn a fresh critic session.`,
+            `🎯 All tasks done for ${epicId}! Starting evaluation...`,
             "info"
           );
           updateWidgets();
+          pi.sendMessage({
+            customType: "all-tasks-done",
+            content: `All tasks for epic ${epicId} are complete. Proceed to EVALUATE phase — spawn a fresh critic session via /beads:evaluate. This is mandatory before the epic can be closed.`,
+            display: true,
+          }, { deliverAs: "followUp", triggerTurn: true });
         },
         onTaskStuck(taskId, title) {
           widgetCtx?.ui.notify(`✗ ${title} (${taskId}) stuck — needs attention`, "warning");
@@ -230,8 +301,8 @@ export default function (pi: ExtensionAPI) {
         onEpicCompleted(epicId) {
           widgetCtx?.ui.notify(`🟢 Epic ${epicId} complete!`, "info");
           widgetCtx?.ui.setStatus("beads", "beads: ✓ complete");
-          widgetCtx?.ui.setWidget("beads-pipeline", undefined);
-          widgetCtx?.ui.setWidget("beads-gates", undefined);
+          currentPipelineLines = [];
+          currentGateLines = [];
         },
         onCriticDone(epicId, satisfied, lastCritic, iteration) {
           if (satisfied) {
@@ -445,17 +516,22 @@ export default function (pi: ExtensionAPI) {
 
       ctx.ui.notify(`Spawning ${ready.length} worker(s)...`, "info");
 
-      const taskList = ready.map((t) => `- ${t.id}: ${t.title}`).join("\n");
       const cwd = process.cwd();
+      const modelFlag = settings.workerModel ? `--model ${settings.workerModel} ` : "";
+      const skillLoad = settings.workerSkills.length > 0
+        ? `Load ${settings.workerSkills.join(", ")} skill. `
+        : "";
 
-      ctx.ui.setEditorText(
-        `Spawn workers for these ready tasks:\n${taskList}\n\n` +
-        `For each task, use:\n` +
-        `process start "pi -p 'Load sakthisi-beads-work skill. ` +
-        `Execute task <id>: <title>. Work directory: ${cwd}. ` +
-        `Epic: ${epicId}. Update beads state when done.'" ` +
-        `name="worker-<id>" alertOnSuccess=true alertOnFailure=true`
-      );
+      const commands = ready.map((t) => {
+        const prompt = `${skillLoad}Execute task ${t.id}: ${t.title}. Work directory: ${cwd}. Epic: ${epicId}. Update beads state when done.`;
+        return `process start "echo '' | pi ${modelFlag}-p '${prompt.replace(/'/g, "'\\''")}'" name="worker-${t.id}" alertOnSuccess=true alertOnFailure=true`;
+      });
+
+      pi.sendMessage({
+        customType: "spawn-workers",
+        content: `Spawn workers for ${ready.length} ready task(s). Execute these EXACT commands (do NOT modify them):\n\n${commands.join("\n\n")}`,
+        display: true,
+      }, { deliverAs: "followUp", triggerTurn: true });
     },
   });
 
@@ -492,15 +568,13 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Spawning fresh critic session...", "info");
 
       const criticPrompt = CRITIC_PROMPT(epicId, criteria, cwd, iteration);
+      const command = `process start "echo '' | pi ${modelFlag}-p '${criticPrompt.replace(/'/g, "'\\''")}'" name="critic-${epicId}" alertOnSuccess=true alertOnFailure=true`;
 
-      ctx.ui.setEditorText(
-        `Spawn a critic to evaluate epic ${epicId}:\n\n` +
-        `process start "pi ${modelFlag}-p '${criticPrompt.replace(/'/g, "'\\''")}'" ` +
-        `name="critic-${epicId}" alertOnSuccess=true alertOnFailure=true\n\n` +
-        `The critic runs in a fresh session with no prior context. ` +
-        `It will read the evaluator criteria, run checks, and write a [critic] comment to beads. ` +
-        `When it exits, evaluate the [critic] comment and decide: advance or remediate.`
-      );
+      pi.sendMessage({
+        customType: "spawn-critic",
+        content: `Spawn a critic to evaluate epic ${epicId}. Execute this EXACT command (do NOT modify it):\n\n${command}\n\nThe critic runs in a fresh session with no prior context. It will read the evaluator criteria, run checks, and write a [critic] comment to beads. When it exits, evaluate the [critic] comment and decide: advance or remediate.`,
+        display: true,
+      }, { deliverAs: "followUp", triggerTurn: true });
     },
   });
 
@@ -514,11 +588,20 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.setEditorText(
-        `Approve the plan for epic ${epicId}:\n` +
-        `bd label add ${epicId} plan-approved --no-daemon\n` +
-        `bd comments add ${epicId} "[APPROVED] Plan approved by human" --no-daemon`
-      );
+      // Execute approval directly — no agent round-trip needed
+      bd(`label add ${epicId} plan-approved`);
+      bd(`comments add ${epicId} "[APPROVED] Plan approved by human"`);
+      planApprovedByHuman = true;
+
+      updateWidgets(epicId);
+      ctx.ui.notify("Plan approved! Proceeding to decompose phase.", "info");
+
+      // Inject message directly — no editor expand + enter needed
+      pi.sendMessage({
+        customType: "plan-approved",
+        content: `Plan for epic ${epicId} has been approved by the human. Proceed to the DECOMPOSE phase.`,
+        display: true,
+      }, { deliverAs: "followUp", triggerTurn: true });
     },
   });
 
@@ -624,31 +707,29 @@ This session uses the beads-command-center extension. One session = one epic.
 ### Phase Flow (shown in the pipeline widget above)
 
 \`\`\`
-research → purpose → plan → decompose → work → evaluate
+research → plan → decompose → work → evaluate
 \`\`\`
 
 Each phase must complete before the next unlocks. The widget shows blocked phases as dimmed.
 
 ### Phase Rules
 
-1. **RESEARCH** (first, always): Ask clarifying questions. Fetch context (code, docs, wiki via \`my\` CLI). Write findings to \`docs/<epic-name>/RESEARCH.md\`. Iterate with human until satisfied. Mark done: \`bd label add <epic> research-done --no-daemon\`
+1. **RESEARCH** (first, always): If no epic exists yet, create one first: \`bd create "<title>" -t epic --no-daemon\`. Then ask clarifying questions. Fetch context (code, docs, wiki via \`my\` CLI). Write findings to \`docs/<epic-name>/RESEARCH.md\`. Iterate with human until satisfied. Mark done: \`bd label add <epic> research-done --no-daemon\`
 
-2. **PURPOSE**: From research, define WHY. Write the PURPOSE section in PLAN.md. What problem? What success looks like? What constraints?
+2. **PLAN**: Write \`docs/<epic-name>/PLAN.md\` with purpose, approach, risks, task breakdown, acceptance criteria. Work back and forth with human. Human approves via \`/beads:approve\`.
 
-3. **PLAN**: Write \`docs/<epic-name>/PLAN.md\` with approach, risks, task breakdown, acceptance criteria. Work back and forth with human. Human approves via \`/beads:approve\`.
+3. **DECOMPOSE**: Break plan into beads features and tasks. Use \`sakthisi-beads-decompose\` skill.
 
-4. **DECOMPOSE**: Break plan into beads features and tasks. Use \`sakthisi-beads-decompose\` skill.
-
-5. **WORK**: Spawn workers via \`/beads:run\` or \`process start\`. When notified of worker completion, evaluate the output:
+4. **WORK**: Immediately spawn workers after decompose — do NOT wait for the human. Use \`/beads:run\` to get the exact spawn commands, then execute them. When notified of worker completion, evaluate the output:
    - Done correctly → \`bd close <id> --reason "completed" --no-daemon\`
    - Failed, retryable → add remediation comment, re-spawn
    - Stuck → mark stuck, surface to human
 
-6. **EVALUATE** (mandatory, never skip): Spawn a fresh critic session via \`/beads:evaluate\`. The critic is a separate, unbiased session. You CANNOT close the epic without critic evaluation — it will be blocked. Read the critic's \`[critic]\` comment and decide next steps.
+5. **EVALUATE** (mandatory, never skip): Spawn a fresh critic session via \`/beads:evaluate\`. The critic is a separate, unbiased session. You CANNOT close the epic without critic evaluation — it will be blocked. Read the critic's \`[critic]\` comment and decide next steps.
 
-7. **REMEDIATE** (if critic failed): Read the \`[critic]\` comment. Create remediation tasks for each failed criterion. Label them \`assignee:worker\`. Advance the iteration label. Spawn workers via \`/beads:run\`. Loop back to step 5 (work). Repeat until critic passes or max iterations hit.
+6. **REMEDIATE** (if critic failed): Read the \`[critic]\` comment. Create remediation tasks for each failed criterion. Label them \`assignee:worker\`. Advance the iteration label. Spawn workers via \`/beads:run\`. Loop back to step 5 (work). Repeat until critic passes or max iterations hit.
 
-8. **RESEARCH QUESTIONS**: When you need to ask the user clarifying questions during research, use the \`questionnaire\` tool for structured multi-choice questions. It provides a tab-based UI for multiple questions.
+7. **RESEARCH QUESTIONS**: When you need to ask the user clarifying questions during research, use the \`questionnaire\` tool for structured multi-choice questions. It provides a tab-based UI for multiple questions.
 
 ### Execution Rules
 
