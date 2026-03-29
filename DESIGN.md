@@ -576,6 +576,7 @@ Items for a follow-up agent to pick up. Ordered roughly by impact.
 - [ ] **Scrollable overlays** — For epics with many tasks, add scroll support (J/K for page up/down)
 - [ ] **Color-coded phase transitions** — Brief animation or highlight when a phase completes (flash green)
 - [ ] **Compact mode** — Single-line widget for narrow terminals: `✓✓✓✓▶○ 4/7`
+- [ ] **Custom footer** — Replace default 2-line footer with compact single line (model + beads status + context meter). Needs investigation into `applyExtensionDefaults` / `setFooter` lifecycle.
 
 ### P2 — Orchestration Improvements
 
