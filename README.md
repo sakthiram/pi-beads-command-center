@@ -2,7 +2,7 @@
 
 Pi extension for observable, human-in-the-loop task orchestration. Replaces `beads-executor.sh` and `ralph.sh` with an integrated TUI that keeps the main agent session as the orchestrator.
 
-One session = one epic. The phase pipeline guides you through the workflow — no tribal knowledge needed.
+One directory = one epic. When an epic completes and you want to add more work, reopen it — don't create a new one. The phase pipeline guides you through the workflow — no tribal knowledge needed.
 
 Tested and working end-to-end as of 2026-03-29.
 
@@ -142,13 +142,15 @@ The extension enforces workflow integrity through 8 tool gates — `tool_call` e
 | 1 | **Script redirect** | `beads-executor.sh` in bash | Use `/beads:run` instead |
 | 2 | **Script redirect** | `ralph.sh` in bash | Use extension commands instead |
 | 3 | **Epic-first** | `bd create` without `-t epic` when no epic exists | Create an epic first |
-| 4 | **Single epic** | `bd create -t epic` when epic already active | One epic per session |
+| 4 | **Single epic** | `bd create -t epic` when epic already active | One epic per directory — reopen the closed epic instead |
 | 5 | **Critic gate** | `bd close <epic>` without `critic-satisfied` label | Spawn critic via `/beads:evaluate` first |
 | 6 | **Critic integrity** | `bd label add ... critic-satisfied` | Only the critic session can add this label — respawn critic instead |
 | 7 | **Plan approval** | `bd label add ... plan-approved` without human approval | Human must run `/beads:approve` |
 | 8 | **No direct work** | `write` or `edit` on non-docs files during work phase | You're the orchestrator — spawn a worker |
 
 Gates 5 and 6 work together as a two-layer defense: the orchestrator cannot close the epic without critic evaluation (gate 5), AND it cannot bypass that by self-labeling `critic-satisfied` (gate 6). The only path is spawning a fresh critic session that independently decides whether to add the label.
+
+Gate 4 handles the epic lifecycle: one directory = one epic. If the epic is closed and you need more work, the gate tells you to `bd reopen` + `bd update --title` instead of creating a new epic. This prevents orphaned epics and keeps all history in one thread.
 
 Skills don't need modification — the extension overrides at the pi level.
 
