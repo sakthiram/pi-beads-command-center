@@ -74,7 +74,7 @@ export default function (pi: ExtensionAPI) {
       if (cmd.includes("beads-executor.sh")) {
         return {
           block: true,
-          reason: "beads-executor.sh is replaced by the beads-dashboard extension. Use /beads:run to spawn workers, or ask the agent to spawn workers for ready tasks.",
+          reason: "beads-executor.sh is replaced by the beads-command-center extension. Use /beads:run to spawn workers, or ask the agent to spawn workers for ready tasks.",
         };
       }
       if (cmd.includes("ralph.sh")) {
@@ -83,6 +83,23 @@ export default function (pi: ExtensionAPI) {
           reason: "ralph.sh is replaced by the beads-command-center extension. The main agent session handles the decompose→work→evaluate loop. Use /beads:run to spawn workers and /beads:evaluate to spawn a critic.",
         };
       }
+    }
+  });
+
+  // ─── Detect Epic Creation Mid-Session ────────────────────────────────────
+  // If no epic existed at session_start, check after each bash command
+  // to see if one was just created.
+
+  pi.on("tool_result", async (event) => {
+    if (!widgetCtx || activeEpicId) return;
+    const beadsDir = path.join(process.cwd(), ".beads");
+    if (!fs.existsSync(beadsDir)) return;
+    const epic = findActiveEpic();
+    if (epic) {
+      activeEpicId = epic.id;
+      updateWidgets(epic.id);
+      startPoller(widgetCtx);
+      widgetCtx.ui.notify(`Beads command center: tracking ${epic.title}`, "info");
     }
   });
 
