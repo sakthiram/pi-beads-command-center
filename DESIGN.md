@@ -536,6 +536,140 @@ sequenceDiagram
 | `/beads:comment <id> <text>` | any | Add `[human]` comment to task |
 | `/beads:stop` | work | Kill all workers, pause execution |
 | `/beads:resume` | work | Resume — re-spawn workers for ready tasks |
+## Composability & Extension Stacking
+
+This extension is designed to be one layer in a stack. The vision is specialized agent UX built from composable packages — protocol (beads), skills (portable prompts), and UX (harness-specific extensions). Multiple UX extensions will coexist: a device-flash workflow, a CI/CD validator, a log analyzer, each adding their own gates, widgets, and commands on top of the same beads orchestration substrate.
+
+This section catalogs every pi API surface this extension touches, the conflict potential when other extensions use the same surface, and the design rules for keeping things stackable.
+
+### API Surface Inventory
+
+| API | Usage in this extension | Conflict model |
+|-----|------------------------|----------------|
+| `pi.on("before_agent_start")` | Appends orchestration protocol to system prompt | **Additive** — multiple handlers append independently. Order undefined. |
+| `pi.on("tool_call")` ×2 | 8 tool gates that block commands | **First-block-wins** — if any handler returns `block: true`, the call is blocked. Other handlers don't run. |
+| `pi.on("tool_result")` | Detects epic creation mid-session | **Additive** — multiple handlers see the same result. No conflict. |
+| `pi.on("session_start")` | Initializes widgets, footer, poller | **Additive** — but UI primitives called inside can conflict (see below). |
+| `pi.registerCommand()` ×10 | `/beads`, `/beads:run`, etc. | **Namespace collision** — two extensions registering the same command name will conflict. |
+| `pi.sendMessage()` ×4 | Injects follow-up messages that trigger agent turns | **Additive but noisy** — multiple extensions injecting messages can overwhelm the agent or create conflicting instructions. |
+| `ctx.ui.setWidget()` ×2 | Pipeline (above) + gates (below editor) | **ID collision** — same widget ID overwrites. Different IDs coexist. |
+| `ctx.ui.setFooter()` ×1 | Custom footer replacing built-in | **Last-write-wins** — only one footer can exist. Multiple extensions calling this will fight. |
+| `ctx.ui.setStatus()` | Status line in footer | **Key-scoped** — each extension uses a unique key ("beads"). Multiple keys coexist in the footer. Safe. |
+| `ctx.ui.setEditorText()` ×6 | Pre-loads phase prompts into editor | **Last-write-wins** — if two extensions set editor text in the same turn, one is lost. |
+| `ctx.ui.notify()` ×20 | Notifications for task events | **Additive** — notifications stack. No conflict, but can be noisy. |
+| `ctx.ui.custom()` ×2 | Overlay dashboards | **Modal** — overlays take focus. Only one at a time. Sequential, not conflicting. |
+
+### Conflict Zones & Mitigations
+
+#### 1. Tool Gates: First-Block-Wins
+
+When multiple extensions register `tool_call` handlers, pi runs them in registration order. The first handler that returns `block: true` stops execution — other handlers never see the call.
+
+This means gate ordering matters. If a device-flash extension wants to block `bash` commands that touch `/dev/tty*`, and beads-command-center blocks `bash` commands containing `beads-executor.sh`, the first registered handler wins.
+
+**Design rule:** Gates should be narrow and non-overlapping. Each extension should only gate commands in its own domain. Beads gates check for `bd` commands and `beads-executor.sh`/`ralph.sh`. A device extension should gate `flash`, `adb`, `serial` commands. If domains overlap, the extensions need explicit coordination — either a shared gate registry or a priority system.
+
+**Current risk:** Gate 8 (no direct work) blocks ALL `write`/`edit` calls on non-docs files during work phase. This is broad — a device-flash extension that needs to write config files would be blocked. Mitigation: make the path allowlist configurable, or let extensions register "exempt" paths.
+
+#### 2. Footer: Single Owner
+
+`setFooter()` replaces the entire footer. Only one extension can own it. This extension currently replaces the built-in footer with a custom one that renders extension statuses.
+
+**Design rule:** Don't call `setFooter()`. Use `setStatus(key, text)` instead — it's key-scoped and stackable. Multiple extensions can each set their own status key and they all render in the footer without conflict.
+
+**Action needed:** This extension should migrate from `setFooter()` to relying solely on `setStatus("beads", ...)`. The custom footer was added to render all extension statuses, but that's the built-in footer's job. Remove the `setFooter()` call and let the default footer handle layout.
+
+#### 3. System Prompt: Additive but Unbounded
+
+`before_agent_start` handlers each append to the system prompt. With multiple extensions, the prompt grows. At some point it hits context limits or degrades model performance.
+
+**Design rule:** Keep injected prompt text minimal. This extension injects ~800 tokens of orchestration rules. Each additional extension should budget its prompt injection. Consider a shared prompt budget (e.g., 2000 tokens total for all extensions) and prioritize by relevance to the current phase.
+
+**Future consideration:** Extensions could check the current phase and only inject relevant rules. During research phase, the device-flash extension doesn't need to inject flashing instructions.
+
+#### 4. sendMessage: Conflicting Instructions
+
+`sendMessage` with `triggerTurn: true` injects a message and kicks the agent into a new turn. If two extensions both inject messages in the same cycle, the agent sees two potentially conflicting instructions.
+
+**Design rule:** Use `triggerTurn: true` sparingly. Prefer `notify()` for informational updates and reserve `sendMessage` for phase transitions that require agent action. If multiple extensions need to trigger turns, they should coordinate through beads state (labels, comments) rather than racing to inject messages.
+
+#### 5. Widget IDs: Namespace Your Keys
+
+Widgets are identified by string IDs. Two extensions using the same ID will overwrite each other.
+
+**Design rule:** Prefix widget IDs with the package name. This extension uses `"beads-pipeline"` and `"beads-gates"`. A device extension should use `"device-status"`, `"device-flash-progress"`, etc.
+
+**Placement matters:** Both `aboveEditor` and `belowEditor` slots can hold multiple widgets. They render in registration order. Too many widgets shrink the editor area. Extensions should be conservative — one widget each, collapsible when not relevant.
+
+#### 6. setEditorText: Last-Write-Wins
+
+Multiple extensions pre-loading prompts into the editor will fight. Only the last write survives.
+
+**Design rule:** Only the orchestration layer (this extension) should call `setEditorText()`. Specialized extensions should surface their prompts through `notify()` or `sendMessage()` and let the orchestrator decide what goes in the editor. Alternatively, use a queue pattern — extensions push prompt suggestions, the orchestrator picks the highest-priority one.
+
+#### 7. Command Namespaces
+
+All 10 commands in this extension use the `beads:` prefix. This is the namespace convention.
+
+**Design rule:** Every extension gets a prefix. `beads:*` for orchestration, `device:*` for device workflows, `ci:*` for CI/CD, `log:*` for log analysis. The bare `/beads` command is the dashboard entry point — each extension gets one bare command for its dashboard.
+
+#### 8. Overlays: Sequential, Not Concurrent
+
+`ctx.ui.custom()` takes over the screen. Only one overlay can be active. This is inherently sequential — no conflict, but extensions should not hold overlays open for long periods.
+
+**Design rule:** Overlays are for quick interactions (dashboards, confirmations, selections). Long-running status belongs in widgets. Don't block the agent loop with an open overlay.
+
+### Stacking Architecture
+
+The target architecture for multiple specialized extensions:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  pi session                                                            │
+│                                                                        │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Widgets (above editor)                                            │  │
+│  │  ┌────────────────────┐ ┌────────────────────┐ ┌──────────────────┐  │  │
+│  │  │ beads-pipeline     │ │ device-status      │ │ ci-status        │  │  │
+│  │  └────────────────────┘ └────────────────────┘ └──────────────────┘  │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Tool Gates (stacked, narrow domains)                              │  │
+│  │  beads: bd commands, write/edit during work phase                  │  │
+│  │  device: flash, adb, serial commands                              │  │
+│  │  ci: deploy, release, publish commands                            │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │  Footer (built-in, not overridden)                                │  │
+│  │  setStatus("beads", ...) + setStatus("device", ...) + ...         │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+│  Commands: /beads:* │ /device:* │ /ci:* │ /log:*                      │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Design Rules for New Extensions
+
+When building a new package that stacks with beads-command-center:
+
+1. **Namespace everything** — commands (`prefix:*`), widget IDs (`prefix-*`), status keys (`prefix`)
+2. **Don't call `setFooter()`** — use `setStatus(key, text)` for stackable footer presence
+3. **Keep gates narrow** — only intercept commands in your domain. Check command content precisely, don't match broad patterns
+4. **Don't call `setEditorText()`** — use `sendMessage()` or `notify()` to surface prompts. Let the orchestration layer own the editor
+5. **Budget your system prompt injection** — keep `before_agent_start` additions under 500 tokens. Consider phase-gating (only inject when relevant)
+6. **Use `triggerTurn` sparingly** — prefer `notify()` for status updates. Reserve `sendMessage` with `triggerTurn: true` for actions that require agent response
+7. **Coordinate through beads state** — use labels and comments on tasks/epics as the shared coordination substrate, not extension-to-extension messaging
+8. **Respect the orchestrator role** — beads-command-center is the orchestrator. Specialized extensions add domain-specific gates, widgets, and commands but don't try to drive the phase pipeline
+
+### Known Action Items for Stackability
+
+- [ ] **Migrate off `setFooter()`** — this extension currently replaces the built-in footer. Should use `setStatus()` only and let the default footer render all extension statuses
+- [ ] **Make gate 8 path allowlist configurable** — the "no direct work" gate blocks all `write`/`edit` outside docs/. Other extensions may need to write config files, device manifests, etc. Add an allowlist in `settings.json`
+- [ ] **Phase-gate system prompt injection** — only inject orchestration rules relevant to the current phase, reducing prompt bloat when multiple extensions are loaded
+- [ ] **Add extension event bus** — pi supports `pi.events` for inter-extension communication. Use this for coordination instead of relying on shared beads state for time-sensitive signals
+- [ ] **Widget visibility API** — widgets should auto-hide when not relevant (e.g., device-status widget hides when not in work phase, beads-pipeline collapses to single line when phase is stable)
 
 ## Future Considerations
 
