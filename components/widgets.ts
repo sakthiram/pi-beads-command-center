@@ -26,22 +26,20 @@ export function resolvePhases(state: EpicState, counts: TaskCounts): PhaseState[
   const labels = state.epic.labels;
 
   const hasResearch = labels.includes("research-done");
-  const hasPurpose = labels.includes("purpose-done");
+  const hasPurpose = labels.includes("purpose-done") || labels.includes("plan-approved");
   const hasPlan = labels.includes("plan-approved");
   const hasDecompose = counts.total > 0;
   const allTasksDone = counts.total > 0 && counts.done === counts.total;
+  const hasInProgress = counts.inProgress > 0;
   const isStuck = state.stuck;
   const criticDone = state.criticSatisfied;
-
-  // Active phase from beads labels (work/evaluate phases)
-  const beadsPhase = state.phase; // decompose, work, evaluate, or ""
 
   const phases: PhaseState[] = [];
 
   // Research
   if (hasResearch) {
     phases.push({ phase: "research", status: "done" });
-  } else if (!hasPurpose && !hasPlan) {
+  } else if (!hasPlan) {
     phases.push({ phase: "research", status: "active" });
   } else {
     phases.push({ phase: "research", status: "done" }); // skipped = done
@@ -59,19 +57,17 @@ export function resolvePhases(state: EpicState, counts: TaskCounts): PhaseState[
   // Plan
   if (hasPlan) {
     phases.push({ phase: "plan", status: "done" });
-  } else if (hasPurpose || hasResearch) {
-    // Can plan after purpose (or research if purpose was quick)
+  } else {
     const purposeDone = phases.find((p) => p.phase === "purpose")?.status === "done";
     phases.push({ phase: "plan", status: purposeDone ? "active" : "blocked" });
-  } else {
-    phases.push({ phase: "plan", status: "blocked" });
   }
 
-  // Decompose
-  if (hasDecompose && (beadsPhase !== "decompose")) {
+  // Decompose — done if tasks exist AND (work started or all done)
+  if (hasDecompose && (hasInProgress || allTasksDone || counts.done > 0)) {
     phases.push({ phase: "decompose", status: "done" });
-  } else if (hasPlan && beadsPhase === "decompose") {
-    phases.push({ phase: "decompose", status: "active" });
+  } else if (hasDecompose && !hasInProgress && counts.done === 0) {
+    // Tasks exist but none started yet — decompose just finished
+    phases.push({ phase: "decompose", status: "done" });
   } else if (hasPlan && !hasDecompose) {
     phases.push({ phase: "decompose", status: "ready" });
   } else {
@@ -79,10 +75,10 @@ export function resolvePhases(state: EpicState, counts: TaskCounts): PhaseState[
   }
 
   // Work
-  if (allTasksDone && beadsPhase !== "work") {
+  if (allTasksDone) {
     phases.push({ phase: "work", status: "done" });
-  } else if (beadsPhase === "work" || (hasDecompose && !allTasksDone && hasPlan)) {
-    const detail = counts.total > 0 ? `${counts.done}/${counts.total}` : undefined;
+  } else if (hasDecompose && (hasInProgress || counts.done > 0)) {
+    const detail = `${counts.done}/${counts.total}`;
     if (isStuck) {
       phases.push({ phase: "work", status: "failed", detail });
     } else {
@@ -97,8 +93,6 @@ export function resolvePhases(state: EpicState, counts: TaskCounts): PhaseState[
   // Evaluate
   if (criticDone) {
     phases.push({ phase: "evaluate", status: "done" });
-  } else if (beadsPhase === "evaluate") {
-    phases.push({ phase: "evaluate", status: "active" });
   } else if (allTasksDone) {
     phases.push({ phase: "evaluate", status: "ready" });
   } else {
