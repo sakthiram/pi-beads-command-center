@@ -148,7 +148,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`Beads command center: tracking ${epic.title}`, "info");
     }
 
-    // Compact footer: model + beads status
+    // Compact footer: model + beads status + context meter
     ctx.ui.setFooter((_tui, theme, _footerData) => ({
       dispose: () => {},
       invalidate() {},
@@ -159,19 +159,16 @@ export default function (pi: ExtensionAPI) {
         const filled = Math.round(pct / 10);
         const bar = "#".repeat(filled) + "-".repeat(10 - filled);
 
-        const left = theme.fg("dim", ` ${model}`);
-        const beadsStatus = activeEpicId
-          ? renderStatusLine(
-              getEpicState(activeEpicId) || { epic: { title: "?", labels: [] }, tasks: [], features: [], iteration: 0, phase: "", criticSatisfied: false, stuck: false, evaluatorCriteria: [], lastCritic: "", humanGates: [], docsDir: "" } as any,
-              poller?.getCounts() || { total: 0, done: 0, inProgress: 0, open: 0, stuck: 0, blocked: 0 },
-              settings.maxIterations
-            )
-          : "no epic";
-        const mid = theme.fg("muted", ` · `) + beadsStatus;
-        const right = theme.fg("dim", `[${bar}] ${Math.round(pct)}% `);
+        const epicTitle = activeEpicId
+          ? (getEpicState(activeEpicId)?.epic.title || activeEpicId).slice(0, 30)
+          : "";
+        const epicPart = epicTitle ? ` · ${epicTitle}` : "";
 
-        const pad = " ".repeat(Math.max(1, width - visibleWidth(left + mid) - visibleWidth(right)));
-        return [truncateToWidth(left + mid + pad + right, width)];
+        const left = ` ${model}${epicPart}`;
+        const right = `[${bar}] ${Math.round(pct)}% `;
+
+        const pad = Math.max(1, width - left.length - right.length);
+        return [theme.fg("dim", left) + " ".repeat(pad) + theme.fg("dim", right)];
       },
     }));
   });
@@ -190,9 +187,6 @@ export default function (pi: ExtensionAPI) {
 
     const counts = countTasks(state.tasks);
     const width = process.stdout.columns || 80;
-
-    // Status line
-    widgetCtx.ui.setStatus("beads", renderStatusLine(state, counts, settings.maxIterations));
 
     // Phase pipeline widget (above editor)
     const pipelineLines = renderPhasePipeline(state, counts, width);
