@@ -135,8 +135,8 @@ export function renderPhasePipeline(
 ): string[] {
   const phases = resolvePhases(state, counts);
 
-  const epicName = state.epic.title.length > 20
-    ? state.epic.title.slice(0, 20) + "…"
+  const epicName = state.epic.title.length > 25
+    ? state.epic.title.slice(0, 25) + "…"
     : state.epic.title;
 
   const iterStr = state.iteration > 1 ? ` [iter ${state.iteration}]` : "";
@@ -159,20 +159,9 @@ export function renderPhasePipeline(
   });
 
   const pipeline = tokens.join(ansi("2", " → "));
-  const header = `${epicName}${iterStr}`;
+  const header = ansi("1", epicName) + ansi("2", iterStr);
 
-  // Build the box
-  const line1 = `┌─ ${header} ${"─".repeat(Math.max(0, width - header.length - 4))}┐`;
-  const line2 = `│ ${pipeline} │`;
-  const line3 = `└${"─".repeat(Math.max(0, width - 2))}┘`;
-
-  // If critic feedback exists during evaluate, add a second line
-  if (state.lastCritic && phases.find((p) => p.phase === "evaluate")?.status === "active") {
-    const criticLine = `│ ${ansi("35", "critic:")} ${state.lastCritic.slice(0, width - 14)} │`;
-    return [line1, line2, criticLine, line3];
-  }
-
-  return [line1, line2, line3];
+  return [`${header}  ${pipeline}`];
 }
 
 // ─── Status Line ─────────────────────────────────────────────────────────────
