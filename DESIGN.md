@@ -675,10 +675,10 @@ When building a new package that stacks with beads-command-center:
 
 - **Context summarization** — When the main session's context fills up, auto-summarize completed tasks and inject the summary. Beads comments serve as persistent memory.
 - **Multi-epic support** — Dashboard can show multiple epics. Status line cycles or shows the active one.
-- **Worker skill loading** — Workers could load different skill sets based on task type (e.g., `amelia-build` for build tasks, `amelia-logs` for log analysis).
+- **Worker skill loading** — Workers could load different skill sets based on task type (e.g., `build` skill for build tasks, `log-analysis` for log analysis).
 - **Metrics collection** — Track time-per-task, claims-per-task, iterations-per-epic for tuning insights.
 - **Dependency graph visualization** — ASCII DAG of task dependencies in an overlay.
-- **Remote workers** — Spawn workers on remote machines via SSH for hardware-dependent tasks (e.g., Amelia device testing).
+- **Remote workers** — Spawn workers on remote machines via SSH for hardware-dependent tasks (e.g., embedded device testing).
 
 ## TODO / Next Steps
 
