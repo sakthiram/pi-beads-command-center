@@ -662,6 +662,7 @@ When building a new package that stacks with beads-command-center:
 6. **Use `triggerTurn` sparingly** — prefer `notify()` for status updates. Reserve `sendMessage` with `triggerTurn: true` for actions that require agent response
 7. **Coordinate through beads state** — use labels and comments on tasks/epics as the shared coordination substrate, not extension-to-extension messaging
 8. **Respect the orchestrator role** — beads-command-center is the orchestrator. Specialized extensions add domain-specific gates, widgets, and commands but don't try to drive the phase pipeline
+9. **Prefer natural language over slash commands** — only register commands for mechanical actions the agent can't do (human gates, process spawning, UI dashboards). Phase transitions like "start research" or "write the plan" are better handled by the agent from natural language input. Don't wrap `setEditorText` in a slash command when the user can just type what they want
 
 ### Known Action Items for Stackability
 
