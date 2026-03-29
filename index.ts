@@ -103,6 +103,36 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
+  // ─── Block Orchestrator From Doing Work ──────────────────────────────────
+  // During work/evaluate phases, block write/edit — orchestrator should spawn workers.
+
+  pi.on("tool_call", async (event) => {
+    if (!activeEpicId) return;
+    const state = getEpicState(activeEpicId);
+    if (!state) return;
+
+    // Only block during work phase when tasks exist
+    const counts = countTasks(state.tasks);
+    if (counts.total === 0) return;
+
+    const isWorkPhase = state.phase === "work" ||
+      (state.epic.labels.includes("plan-approved") && counts.done < counts.total);
+
+    if (!isWorkPhase) return;
+
+    if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
+      const filePath = event.input.path || "";
+      // Allow writing to docs/ and .beads/ (orchestrator artifacts)
+      if (filePath.includes("/docs/") || filePath.includes("/.beads/") || filePath.includes("/prompts/")) {
+        return;
+      }
+      return {
+        block: true,
+        reason: "You are the orchestrator — don't write code directly. Spawn a worker via /beads:run or process start to execute tasks. This session handles coordination; workers handle implementation.",
+      };
+    }
+  });
+
   // ─── Session Lifecycle ───────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
@@ -635,6 +665,7 @@ Each phase must complete before the next unlocks. The widget shows blocked phase
 
 ### Execution Rules
 
+- **NEVER do task work directly in this session.** You are the orchestrator, not a worker. Even for trivial tasks, spawn a worker via \`process start\` or \`/beads:run\`. This session handles: research, planning, decomposition, evaluation, and coordination. Workers handle: writing code, running tests, making changes.
 - Do NOT run \`beads-executor.sh\` or \`ralph.sh\` directly (blocked).
 - All \`bd\` commands must use \`--no-daemon\`.
 - Never use \`bd onboard\`, \`bd prime\`, or \`bd sync\`.
