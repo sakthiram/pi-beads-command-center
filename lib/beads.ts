@@ -131,19 +131,7 @@ export function getEpicState(epicId: string, cwd?: string): EpicState | null {
   // Human gates
   const humanGates: HumanGate[] = [];
 
-  // Research gate: if no research-done label and no RESEARCH.md
-  if (!labels.includes("research-done")) {
-    const hasResearchDoc = fs.existsSync(path.join(docsDir, "RESEARCH.md"));
-    if (!hasResearchDoc) {
-      humanGates.push({
-        type: "review",
-        taskId: epicId,
-        description: "Research phase not started — run /beads:research",
-      });
-    }
-  }
-
-  // Plan approval gate
+  // Research gate: only surface plan approval, not research-not-started
   if (labels.includes("research-done") && !labels.includes("plan-approved")) {
     const hasPlanDoc = fs.existsSync(path.join(docsDir, "PLAN.md"));
     if (hasPlanDoc) {

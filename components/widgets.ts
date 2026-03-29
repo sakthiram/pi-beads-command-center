@@ -214,7 +214,7 @@ export function renderHumanGateWidget(gates: HumanGate[]): string[] {
   lines.push(header);
 
   for (const gate of gates.slice(0, 3)) {
-    const icon = gate.type === "approve" ? "✅" : gate.type === "comment" ? "💬" : "👀";
+    const icon = gate.type === "approve" ? "⏳" : gate.type === "comment" ? "💬" : "👀";
     const cmd = gate.type === "approve"
       ? "/beads:approve"
       : `/beads:comment ${gate.taskId}`;

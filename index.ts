@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
-import { Container, Text, DynamicBorder } from "@mariozechner/pi-tui";
+import { Container, Text, DynamicBorder, visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -116,9 +116,34 @@ export default function (pi: ExtensionAPI) {
       updateWidgets(epic.id);
       startPoller(ctx);
       ctx.ui.notify(`Beads command center: tracking ${epic.title}`, "info");
-    } else {
-      ctx.ui.setStatus("beads", "beads: no active epic");
     }
+
+    // Compact footer: model + beads status
+    ctx.ui.setFooter((_tui, theme, _footerData) => ({
+      dispose: () => {},
+      invalidate() {},
+      render(width: number): string[] {
+        const model = ctx.model?.id || "no-model";
+        const usage = ctx.getContextUsage();
+        const pct = (usage && usage.percent !== null) ? usage.percent : 0;
+        const filled = Math.round(pct / 10);
+        const bar = "#".repeat(filled) + "-".repeat(10 - filled);
+
+        const left = theme.fg("dim", ` ${model}`);
+        const beadsStatus = activeEpicId
+          ? renderStatusLine(
+              getEpicState(activeEpicId) || { epic: { title: "?", labels: [] }, tasks: [], features: [], iteration: 0, phase: "", criticSatisfied: false, stuck: false, evaluatorCriteria: [], lastCritic: "", humanGates: [], docsDir: "" } as any,
+              poller?.getCounts() || { total: 0, done: 0, inProgress: 0, open: 0, stuck: 0, blocked: 0 },
+              settings.maxIterations
+            )
+          : "no epic";
+        const mid = theme.fg("muted", ` · `) + beadsStatus;
+        const right = theme.fg("dim", `[${bar}] ${Math.round(pct)}% `);
+
+        const pad = " ".repeat(Math.max(1, width - visibleWidth(left + mid) - visibleWidth(right)));
+        return [truncateToWidth(left + mid + pad + right, width)];
+      },
+    }));
   });
 
   // ─── Poller Setup ────────────────────────────────────────────────────────
