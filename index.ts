@@ -147,30 +147,6 @@ export default function (pi: ExtensionAPI) {
       startPoller(ctx);
       ctx.ui.notify(`Beads command center: tracking ${epic.title}`, "info");
     }
-
-    // Compact footer: model + beads status + context meter
-    ctx.ui.setFooter((_tui, theme, _footerData) => ({
-      dispose: () => {},
-      invalidate() {},
-      render(width: number): string[] {
-        const model = ctx.model?.id || "no-model";
-        const usage = ctx.getContextUsage();
-        const pct = (usage && usage.percent !== null) ? usage.percent : 0;
-        const filled = Math.round(pct / 10);
-        const bar = "#".repeat(filled) + "-".repeat(10 - filled);
-
-        const epicTitle = activeEpicId
-          ? (getEpicState(activeEpicId)?.epic.title || activeEpicId).slice(0, 30)
-          : "";
-        const epicPart = epicTitle ? ` · ${epicTitle}` : "";
-
-        const left = ` ${model}${epicPart}`;
-        const right = `[${bar}] ${Math.round(pct)}% `;
-
-        const pad = Math.max(1, width - left.length - right.length);
-        return [theme.fg("dim", left) + " ".repeat(pad) + theme.fg("dim", right)];
-      },
-    }));
   });
 
   // ─── Poller Setup ────────────────────────────────────────────────────────
@@ -187,6 +163,9 @@ export default function (pi: ExtensionAPI) {
 
     const counts = countTasks(state.tasks);
     const width = process.stdout.columns || 80;
+
+    // Status line in footer
+    widgetCtx.ui.setStatus("beads", renderStatusLine(state, counts, settings.maxIterations));
 
     // Phase pipeline widget (above editor)
     const pipelineLines = renderPhasePipeline(state, counts, width);
