@@ -149,9 +149,12 @@ export default function (pi: ExtensionAPI) {
 
       // Block closing epic without critic evaluation
       // Child tasks have IDs like "epic-id.1", so check the cmd has the exact epic ID (not a subtask)
+      // critic-satisfied only counts if all current tasks are done (label may be stale from prior iteration)
       if (cmd.includes("bd close")) {
         const closesEpic = cmd.split(/\s+/).some((arg) => arg === activeEpicId);
-        if (closesEpic && !state.criticSatisfied && counts.total > 0) {
+        const allDone = counts.total > 0 && counts.done === counts.total;
+        const criticValid = state.criticSatisfied && allDone;
+        if (closesEpic && !criticValid && counts.total > 0) {
           return {
             block: true,
             reason: "Cannot close epic without critic evaluation. Run /beads:evaluate to spawn a fresh, unbiased critic session first. The critic must add the critic-satisfied label before the epic can be closed.",

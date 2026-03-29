@@ -80,8 +80,9 @@ export function resolvePhases(state: EpicState, counts: TaskCounts): PhaseState[
     phases.push({ phase: "work", status: "blocked" });
   }
 
-  // Evaluate
-  if (criticDone) {
+  // Evaluate — critic-satisfied only counts if all tasks are actually done
+  // (label may be stale from a prior iteration after epic reopen)
+  if (criticDone && allTasksDone) {
     phases.push({ phase: "evaluate", status: "done" });
   } else if (allTasksDone) {
     phases.push({ phase: "evaluate", status: "ready" });
