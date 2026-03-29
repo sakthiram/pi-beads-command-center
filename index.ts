@@ -334,6 +334,17 @@ export default function (pi: ExtensionAPI) {
         onPhaseChanged(phase, iteration) {
           widgetCtx?.ui.notify(`Phase: ${phase} (iteration ${iteration})`, "info");
           updateWidgets();
+          // Auto-advance: when work phase begins after decompose, spawn workers immediately
+          if (phase === "work" && activeEpicId) {
+            const ready = getReadyTasks(activeEpicId);
+            if (ready.length > 0) {
+              pi.sendMessage({
+                customType: "auto-advance-work",
+                content: `Decomposition complete — phase:work detected with ${ready.length} ready task(s). Immediately spawn workers via /beads:run. Do NOT wait for the human.`,
+                display: true,
+              }, { deliverAs: "followUp", triggerTurn: true });
+            }
+          }
         },
         onEpicCompleted(epicId) {
           widgetCtx?.ui.notify(`🟢 Epic ${epicId} complete!`, "info");

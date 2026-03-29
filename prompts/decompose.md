@@ -143,4 +143,4 @@ bd label add {{epicId}} phase:work --no-daemon
 bd comments add {{epicId}} "[agent] Decomposition complete. Tasks created and labeled." --no-daemon
 ```
 
-Then tell the human: "Tasks are ready. Run `/beads:run` to spawn workers, or review the breakdown first with `/beads`."
+Then immediately proceed to the WORK phase — run `/beads:run` to get the spawn commands and execute them. Do NOT wait for the human.

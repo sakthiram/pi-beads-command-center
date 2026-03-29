@@ -491,6 +491,60 @@ sequenceDiagram
 
 **Rationale:** Pi widgets (`setWidget`) don't support input handling — they're render-only. The pattern is: widget shows state, user types command to interact. This matches pi-processes' dock pattern and keeps the UI simple. The widget is the "glance," the overlay is the "deep dive."
 
+## Why Pi: Building Agent Applications, Not Configurations
+
+Other coding agent tools have hooks. Claude Code has `PreToolUse`/`PostToolUse`. Kiro CLI has lifecycle events. Most tools let you inject system prompts and define custom slash commands. The difference isn't any single hook — it's how easily they compose into an application.
+
+This extension uses 13 distinct pi APIs in a single file. Event hooks feed into shared state. Tool gates read that state to make decisions. Widgets render it. Commands mutate it. Messages trigger new agent turns based on it. Everything stacks.
+
+### The Patterns That Make This Possible
+
+#### Reactive Phase Advancement via `sendMessage` + `triggerTurn`
+
+The most powerful pattern in this extension is using poller-detected state changes to inject messages that kick the agent into action — without human intervention.
+
+Example: when the poller detects `phase:work` (decompose just completed), it calls:
+
+```typescript
+pi.sendMessage({
+  customType: "auto-advance-work",
+  content: `Decomposition complete — phase:work detected with ${ready.length} ready task(s). Immediately spawn workers via /beads:run.`,
+  display: true,
+}, { deliverAs: "followUp", triggerTurn: true });
+```
+
+The agent gets a new turn, sees the instruction, and spawns workers. No human needed. The same pattern drives the evaluate→remediate loop: `onAllTasksDone` triggers evaluation, `onCriticDone` triggers remediation. The extension creates a self-driving workflow where the agent advances through phases autonomously, with the human only intervening at explicit gates.
+
+This is fundamentally different from a pre-tool hook. It's the extension *initiating* agent behavior based on external state changes, not just reacting to agent actions.
+
+#### Tool Gates as Workflow Guardrails
+
+Tool gates (`tool_call` handlers that return `{ block: true, reason }`) enforce invariants the agent would otherwise violate. The block reason teaches the agent the correct alternative — it self-corrects on the next turn.
+
+The two-layer critic defense is the clearest example:
+- **Gate 5** blocks `bd close <epic>` without the critic approval label — the agent can't skip evaluation
+- **Gate 6** blocks the agent from self-labeling that approval — the agent can't fake evaluation
+- The only path is spawning a fresh critic session that independently decides
+
+No amount of prompt engineering achieves this reliability. The agent *cannot* bypass the gate, regardless of context window pressure, instruction drift, or creative interpretation. It's a hard constraint, not a soft suggestion.
+
+#### Gate 8: Role Separation via Write Blocking
+
+Gate 8 blocks `write`/`edit` on non-docs files during the work phase. This enforces the orchestrator/worker separation — the main session coordinates, workers implement. Even for trivial one-line changes, the orchestrator must spawn a worker. This prevents the "I'll just do it myself" failure mode where the orchestrator accumulates implementation context and loses its coordination perspective.
+
+The gate is path-aware: writes to `docs/`, `.beads/`, and `prompts/` are allowed (orchestrator artifacts). Everything else requires a worker.
+
+#### Stale Label Defense on Epic Reopen
+
+When the poller detects an epic transitioning from closed to open, it automatically strips stale approval labels. This prevents a subtle bug: reopening an epic to add new work would inherit the old critic approval, bypassing evaluation for the new tasks. The extension handles this automatically — no human or agent needs to remember.
+
+### Why This Matters
+
+Any tool can add a pre-tool hook. But can you read shared extension state inside that hook, block the command, surface the reason in a widget, inject a corrective message that triggers a new agent turn, and have the agent self-correct — all without the human typing anything? That's what makes this a 600-line application instead of a 600-line config file.
+
+The stacking is the key. Each API surface is simple. The power comes from composing them: poller detects state → callback fires → `sendMessage` triggers agent turn → agent calls tool → gate validates → widget updates. A closed loop where the extension and agent collaborate as peers, with the human stepping in only at designated gates.
+
+
 ## Comparison: Extension vs. Existing Skills
 
 | Aspect | beads-executor + ralph | beads-command-center extension |
