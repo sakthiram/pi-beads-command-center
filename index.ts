@@ -105,19 +105,33 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Block Orchestrator From Doing Work ──────────────────────────────────
   // During work/evaluate phases, block write/edit — orchestrator should spawn workers.
+  // Also block closing epic without critic evaluation.
 
   pi.on("tool_call", async (event) => {
     if (!activeEpicId) return;
     const state = getEpicState(activeEpicId);
     if (!state) return;
 
-    // Only block during work phase when tasks exist
     const counts = countTasks(state.tasks);
+
+    if (isToolCallEventType("bash", event)) {
+      const cmd = event.input.command || "";
+
+      // Block closing epic without critic evaluation
+      if (cmd.includes("bd close") && cmd.includes(activeEpicId)) {
+        if (!state.criticSatisfied && counts.total > 0) {
+          return {
+            block: true,
+            reason: "Cannot close epic without critic evaluation. Run /beads:evaluate to spawn a fresh, unbiased critic session first. The critic must add the critic-satisfied label before the epic can be closed.",
+          };
+        }
+      }
+    }
+
+    // Block direct code work during work phase
     if (counts.total === 0) return;
 
-    const isWorkPhase = state.phase === "work" ||
-      (state.epic.labels.includes("plan-approved") && counts.done < counts.total);
-
+    const isWorkPhase = state.epic.labels.includes("plan-approved") && counts.done < counts.total;
     if (!isWorkPhase) return;
 
     if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
@@ -630,7 +644,7 @@ Each phase must complete before the next unlocks. The widget shows blocked phase
    - Failed, retryable → add remediation comment, re-spawn
    - Stuck → mark stuck, surface to human
 
-6. **EVALUATE**: Spawn a fresh critic session via \`/beads:evaluate\`. The critic is a separate, unbiased session. Read its \`[critic]\` comment and decide next steps.
+6. **EVALUATE** (mandatory, never skip): Spawn a fresh critic session via \`/beads:evaluate\`. The critic is a separate, unbiased session. You CANNOT close the epic without critic evaluation — it will be blocked. Read the critic's \`[critic]\` comment and decide next steps.
 
 7. **REMEDIATE** (if critic failed): Read the \`[critic]\` comment. Create remediation tasks for each failed criterion. Label them \`assignee:worker\`. Advance the iteration label. Spawn workers via \`/beads:run\`. Loop back to step 5 (work). Repeat until critic passes or max iterations hit.
 
