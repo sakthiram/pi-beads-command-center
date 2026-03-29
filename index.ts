@@ -99,6 +99,14 @@ export default function (pi: ExtensionAPI) {
           };
         }
         if (isEpicCreate && activeEpicId) {
+          // Check if the epic is actually open — if closed, guide toward reopen
+          const epicState = getEpicState(activeEpicId);
+          if (epicState && epicState.epic.status === "closed") {
+            return {
+              block: true,
+              reason: `Epic ${activeEpicId} exists but is closed. One epic per directory. To continue work, reopen it: bd reopen ${activeEpicId} --no-daemon, then optionally update the title: bd update ${activeEpicId} --title "<new title>" --no-daemon. Do NOT create a new epic.`,
+            };
+          }
           return {
             block: true,
             reason: `An epic is already active (${activeEpicId}). Only one epic per session. Create tasks/features under the existing epic instead.`,
@@ -723,7 +731,7 @@ const ORCHESTRATION_CONTEXT = `
 
 ## Beads Command Center — Orchestration Protocol
 
-This session uses the beads-command-center extension. One session = one epic.
+This session uses the beads-command-center extension. One directory = one epic. If the epic is closed and you need to add more work, reopen it with \`bd reopen <epic-id> --no-daemon\` and optionally update the title with \`bd update <epic-id> --title "<new title>" --no-daemon\`. Do NOT create a new epic in the same directory.
 
 ### Phase Flow (shown in the pipeline widget above)
 
