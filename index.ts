@@ -1,6 +1,11 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { isToolCallEventType } from "@mariozechner/pi-coding-agent";
-import { Box, Container, Text, DynamicBorder, visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
+import { Box, Container, Text, visibleWidth, truncateToWidth } from "@mariozechner/pi-tui";
+
+// Helper: render a horizontal separator line (replaces DynamicBorder which is not in pi-tui public API)
+function addSeparator(container: any, theme: any) {
+  container.addChild(new Text(theme.fg("accent", "─".repeat(80)), 0, 0));
+}
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -382,7 +387,7 @@ export default function (pi: ExtensionAPI) {
       await ctx.ui.custom<void>(
         (tui, theme, _kb, done) => {
           const container = new Container();
-          container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+          addSeparator(container, theme);
           container.addChild(
             new Text(theme.fg("accent", theme.bold(`${state.epic.title} (${state.epic.id})`)), 1, 0)
           );
@@ -397,7 +402,7 @@ export default function (pi: ExtensionAPI) {
           container.addChild(
             new Text(theme.fg("dim", "j/k scroll • enter task detail • r refresh • q quit"), 1, 0)
           );
-          container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+          addSeparator(container, theme);
 
           return {
             render: (w: number) => container.render(w),
@@ -499,7 +504,7 @@ export default function (pi: ExtensionAPI) {
       await ctx.ui.custom<void>(
         (tui, theme, _kb, done) => {
           const container = new Container();
-          container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+          addSeparator(container, theme);
 
           const detailLines = renderTaskDetail(task, comments, workerLog);
           for (const line of detailLines) {
@@ -510,7 +515,7 @@ export default function (pi: ExtensionAPI) {
           container.addChild(
             new Text(theme.fg("dim", "c comment • l full log • q back"), 1, 0)
           );
-          container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+          addSeparator(container, theme);
 
           return {
             render: (w: number) => container.render(w),
