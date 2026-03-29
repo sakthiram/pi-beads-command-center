@@ -694,36 +694,39 @@ Items for a follow-up agent to pick up. Ordered roughly by impact.
 - [ ] Handle edge cases: no `.beads/` dir, `bd` not installed, epic with no tasks, worker crash mid-task
 - [ ] Verify `questionnaire` tool works during research phase for structured clarifying questions
 
-### P1 — UI Enhancements
+### P1 — UI & Querying Efficiency
 
-- [ ] **Vertical tab layout for `/beads` overlay** — Render phases as vertical tabs on the left side, active phase's detail (tasks, comments, criteria) on the right. Similar to questionnaire's tab bar but vertical. User navigates phases with j/k, sees contextual detail per phase:
+- [ ] **Replace `bd` CLI polling with file watcher** — Currently `getEpicState` makes 4-7 `execSync("bd ...")` calls every 5 seconds, each spawning a process and opening the SQLite DB. Perles solves this with a file watcher on `beads.db-wal` (SQLite) or `last-touched` (Dolt), only re-querying when data changes. Adopt the same pattern:
   ```
-  ┌─ auth-refactor ────────────────────────────────────────┐
-  │ ✓ research  │ Tasks (4/7)                              │
-  │ ✓ purpose   │  ■ setup JWT middleware                  │
-  │ ✓ plan      │  ■ add token validation                  │
-  │ ✓ decompose │  ▶ fix auth middleware (claim:1)         │
-  │ ▶ work      │  □ session store impl                    │
-  │ ░ evaluate  │  □ rate limit config                     │
-  │             │  □ rate limit tests                      │
-  │             │  □ integration tests                     │
-  │             │                                          │
-  │             │ Active: fix-auth-middleware               │
-  │             │ Worker PID: 42351                         │
-  └─────────────┴──────────────────────────────────────────┘
+  // From perles: internal/beads/adapter/backend.go
+  // SQLite mode: watch database and WAL files
+  WatcherConfig{
+    RelevantFiles:    []string{"beads.db", "beads.db-wal"},
+    DebounceDuration: 100 * time.Millisecond,
+  }
   ```
-- [ ] **Phase-specific detail panels** — When selecting a phase in the vertical tab:
-  - research: show RESEARCH.md summary, open questions count
-  - purpose: show PURPOSE section preview
-  - plan: show PLAN.md summary, approval status
-  - decompose: show feature/task tree
-  - work: show task list with worker status, progress bar
-  - evaluate: show evaluator criteria checklist with pass/fail, critic history
-- [ ] **Interactive task selection in `/beads` overlay** — j/k to select tasks, enter to open `/beads:task` detail, x to mark stuck, c to add comment inline
-- [ ] **Scrollable overlays** — For epics with many tasks, add scroll support (J/K for page up/down)
-- [ ] **Color-coded phase transitions** — Brief animation or highlight when a phase completes (flash green)
-- [ ] **Compact mode** — Single-line widget for narrow terminals: `✓✓✓✓▶○ 4/7`
-- [ ] **Custom footer** — Replace default 2-line footer with compact single line (model + beads status + context meter). Needs investigation into `applyExtensionDefaults` / `setFooter` lifecycle.
+  Use `fs.watch(".beads/beads.db-wal")` in Node.js with debounce. Only call `bd` when the file changes. Eliminates 99% of wasted process spawns.
+
+- [ ] **Reduce `bd` calls per state read** — `getEpicState` currently makes separate calls for `show`, `list --parent (features)`, `list --parent (tasks per feature)`, `comments`. Collapse to fewer calls:
+  - One `bd list --parent <epic> --all --json` for all children (features + tasks)
+  - One `bd comments <epic>` for evaluator/critic comments
+  - Filter by type in JS instead of making N queries
+
+- [ ] **Perles daemon as query backend** — `perles daemon --port <N>` exposes a REST API with BQL query support, event subscriptions, and workflow management. Instead of shelling out to `bd`, query the daemon:
+  ```
+  // Single BQL query replaces 4-7 bd calls:
+  GET /api/query?q=parent:<epicId>+AND+status:open
+  ```
+  See: https://github.com/zjrosen/perles — `cmd/daemon.go`, `internal/beads/adapter/query_executor.go`
+
+- [ ] **Delegate overlay to perles web frontend** — Perles bundles a web frontend (`frontend/dist/`) served by the daemon. Instead of rebuilding a dashboard in pi's limited TUI primitives, the `/beads` command could:
+  - Start `perles daemon` as a sidecar if not running
+  - Open `http://localhost:<port>` in the browser
+  - Show a minimal text summary in the pi overlay with a link to the full dashboard
+  This avoids fighting pi-tui's limited component set (no interactive lists, no scroll, no `DynamicBorder`) and leverages perles' mature kanban board, BQL search, dependency explorer, and workflow management UI.
+
+- [ ] **Compact pipeline widget** — Single-line mode for narrow terminals: `✓✓✓✓▶○ 4/7`
+- [ ] **Widget auto-hide** — Collapse pipeline to single line when phase is stable (no transitions in last 30s)
 
 ### P2 — Orchestration Improvements
 
