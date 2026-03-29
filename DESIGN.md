@@ -1,0 +1,602 @@
+# Beads Command Center — Design Document
+
+## Executive Summary
+
+Beads Command Center is a pi coding agent extension that replaces the standalone `beads-executor.sh` and `ralph.sh` orchestration scripts with an integrated, observable, human-in-the-loop task execution harness. Instead of spawning opaque background processes that run autonomously, the extension keeps the **main agent session as the single orchestrator** — it spawns workers, monitors their progress, evaluates their output, and advances the workflow, all within the pi TUI with full visibility and human control.
+
+The core insight: **the agent in your main session is already the smartest orchestrator you have**. It understands context, reads skills, evaluates quality, and talks to you. The current architecture externalizes orchestration to bash scripts (`beads-executor.sh`, `ralph.sh`) that are mechanical and blind. This extension brings orchestration back into the agent session where it belongs, with the extension handling only the mechanical parts (spawning, polling, notifications) and the agent handling the intelligent parts (evaluation, remediation, phase advancement).
+
+```mermaid
+graph TB
+    subgraph "Current Architecture (3 separate processes)"
+        H[Human] -->|types| MS1[Main Session]
+        MS1 -->|spawns| EX[beads-executor.sh]
+        EX -->|spawns| W1[Worker 1]
+        EX -->|spawns| W2[Worker 2]
+        EX -->|tracks claims| BD1[(Beads State)]
+        MS1 -.->|no visibility| EX
+        
+        R[ralph.sh] -->|wraps| EX
+        R -->|spawns| CR[Critic Subagent]
+        CR -->|evaluates| BD1
+        R -->|reads/writes| BD1
+    end
+
+    subgraph "New Architecture (1 session + extension)"
+        H2[Human] -->|types| MS2[Main Session + Extension]
+        MS2 -->|"process start"| W3[Worker 1]
+        MS2 -->|"process start"| W4[Worker 2]
+        MS2 -->|"process start"| CRIT[Critic Session]
+        MS2 -->|polls + alerts| BD2[(Beads State)]
+        CRIT -->|"[critic] comment"| BD2
+        MS2 -->|"dashboard UI"| H2
+        
+        style MS2 fill:#2d5,stroke:#333,color:#000
+        style CRIT fill:#a3d,stroke:#333,color:#000
+    end
+```
+
+## Phase Model
+
+The extension enforces a linear phase pipeline. Each phase must complete before the next unlocks:
+
+```mermaid
+graph LR
+    R[research] --> P[purpose] --> PL[plan] --> D[decompose] --> W[work] --> E[evaluate]
+    E -->|"critic failed"| W
+    
+    style R fill:#4a9,stroke:#333,color:#000
+    style P fill:#4a9,stroke:#333,color:#000
+    style PL fill:#4a9,stroke:#333,color:#000
+    style D fill:#49a,stroke:#333,color:#000
+    style W fill:#a94,stroke:#333,color:#000
+    style E fill:#a3d,stroke:#333,color:#000
+```
+
+| Phase | Owner | Output | Gate |
+|-------|-------|--------|------|
+| **research** | Agent + Human (interactive) | `docs/<epic>/RESEARCH.md` | `research-done` label |
+| **purpose** | Agent + Human | PURPOSE section in PLAN.md | Implicit (part of plan) |
+| **plan** | Agent + Human | `docs/<epic>/PLAN.md` | `plan-approved` label (human) |
+| **decompose** | Agent | Beads features + tasks | Tasks exist with `assignee:worker` |
+| **work** | Workers (background) | Code changes, test results | All tasks closed |
+| **evaluate** | Critic (fresh session) | `[critic]` comment on epic | `critic-satisfied` label |
+
+### Why Research First
+
+Research is the highest-leverage phase. Inaccurate research leads to wrong plans, which lead to wrong implementations, which lead to rework. The protocol:
+
+1. Agent asks clarifying questions — surfaces unknowns early
+2. Agent fetches context — code, docs, wiki, existing patterns
+3. Agent writes RESEARCH.md — findings, constraints, assumptions
+4. Human reviews and corrects — catches wrong assumptions before they propagate
+5. Iterate until both are satisfied
+
+Only then does the agent write PURPOSE (why) and PLAN (how).
+
+### Why Critic as Separate Session
+
+The main agent session has been involved in research, planning, and orchestration. It's biased — it discussed the approach, agreed on trade-offs, and watched the work happen. A fresh critic session:
+
+- Starts with zero conversation history
+- Only sees: evaluator criteria + task output + test results
+- Cannot be influenced by prior discussions
+- Evaluates purely on output quality
+- Can use a different (cheaper) model
+
+### Artifact Organization
+
+Human-facing artifacts (committable) go in `docs/<epic-name>/`:
+```
+docs/auth-refactor/
+├── RESEARCH.md      # Research findings, constraints, assumptions
+├── PLAN.md          # Purpose, approach, risks, acceptance criteria
+└── DECISIONS.md     # Optional: key decisions log
+```
+
+Machine artifacts (ephemeral, git-ignored) go in `.beads/sessions/<epic>/`:
+```
+.beads/sessions/epic-42/
+├── critic-iter-1.md
+├── executor.log
+├── worker-task-57.log
+└── decompose-iter-1.log
+```
+
+The `name:<label>` on the epic maps to the docs directory name.
+
+## Problem Statement
+
+### What exists today
+
+The beads orchestration stack has three layers:
+
+1. **beads-executor.sh** — A bash script that finds ready tasks (`assignee:worker`, `open`), spawns pi worker subagents for each, tracks claim counts, detects stuck tasks, and auto-closes epics when all tasks complete.
+
+2. **ralph.sh** — A bash script that wraps the executor with a Decompose→Work→Evaluate iteration loop. It spawns a critic subagent to evaluate work against `[evaluator]` criteria, manages iteration/phase labels, and exits on `critic-satisfied` or `stuck`.
+
+3. **Worker sessions** — Separate pi processes that load the `sakthisi-beads-work` skill, execute a single task, and (hopefully) update beads state with comments and status changes.
+
+### What's wrong with this
+
+| Problem | Impact |
+|---------|--------|
+| **Opaque execution** | Executor and ralph run as background bash scripts. No visibility into what's happening without manually tailing log files. |
+| **Unreliable workers** | Workers may crash, overflow context, or exit without updating beads state. The executor only detects this via claim counting — it can't evaluate work quality. |
+| **Mechanical orchestration** | The executor is a bash loop. It can't make intelligent decisions about task quality, remediation strategy, or phase advancement. It just spawns and counts. |
+| **Separate critic** | Ralph spawns a separate pi session just to evaluate. This is expensive (new context, new model call) and disconnected from the orchestrator's understanding. |
+| **No human integration** | The executor runs autonomously. Human gates (`assignee:human`) pause execution but there's no UI to surface what needs attention or let the human act inline. |
+| **Dual process management** | You manage the executor PID, ralph PID, and worker PIDs separately. Stopping, resuming, and debugging requires manual PID tracking. |
+| **Skill conflict** | The beads skill tells the agent to run `beads-executor.sh`. If the extension provides a better execution path, the agent may still try the script because the skill says to. |
+
+### What we want
+
+- **Single session orchestration** — The main agent session is the orchestrator. No separate executor or ralph processes.
+- **Observable execution** — Real-time visibility into task progress, worker status, and evaluation results via TUI widgets and overlays.
+- **Intelligent check-in** — When a worker completes, the agent evaluates the output and decides next steps (close, reopen, remediate, advance phase).
+- **Human-in-the-loop** — Human gates surface in the UI. The human can approve, reject, comment, or override without leaving the session.
+- **Managed workers** — Workers spawn via pi-processes with proper alerting. No manual PID tracking.
+- **Graceful skill coexistence** — The extension intercepts executor/ralph script calls and redirects to its managed execution path. Skills don't need modification.
+
+## Architecture
+
+### System Overview
+
+```mermaid
+graph LR
+    subgraph "Main Pi Session"
+        A[Agent] <-->|conversation| H[Human]
+        A <-->|tool calls| E[Extension]
+        
+        subgraph "beads-command-center extension"
+            E --> P[Poller]
+            E --> S[Spawner]
+            E --> UI[Dashboard UI]
+            E --> G[Tool Gates]
+            E --> CI[Context Injection]
+        end
+    end
+    
+    P -->|"bd show/list"| BD[(Beads State<br/>.beads/)]
+    S -->|"process start"| W1[Worker 1<br/>pi session]
+    S -->|"process start"| W2[Worker 2<br/>pi session]
+    W1 -->|"bd update/comment"| BD
+    W2 -->|"bd update/comment"| BD
+    
+    P -->|state changes| E
+    E -->|"notify/alert"| A
+    
+    UI -->|setStatus| F[Footer]
+    UI -->|setWidget| WA[Widget Above]
+    UI -->|setWidget| WB[Widget Below]
+    UI -->|registerCommand| OV[Overlays]
+```
+
+### Component Breakdown
+
+#### 1. Poller (`lib/poller.ts`)
+
+Periodically reads beads state via `bd` CLI commands and detects changes.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Poll: timer tick (5s)
+    Poll --> Diff: read bd state
+    Diff --> Notify: changes detected
+    Diff --> Idle: no changes
+    Notify --> Idle: agent notified
+    
+    state Diff {
+        [*] --> ReadTasks
+        ReadTasks --> ReadComments
+        ReadComments --> ReadLabels
+        ReadLabels --> Compare
+        Compare --> [*]
+    }
+```
+
+What it watches:
+- Task status changes (open → in_progress → closed)
+- New comments (especially `[human]`, `[critic]`, `[worker]`)
+- Label changes (stuck, claim:N, critic-satisfied)
+- Worker process exits (via pi-processes alerts)
+- Epic-level state (iteration, phase)
+
+What it does NOT do:
+- Evaluate work quality (that's the agent's job)
+- Advance phases (that's the agent's job)
+- Make decisions (it only reports state changes)
+
+#### 2. Spawner (`lib/spawner.ts`)
+
+Manages worker lifecycle via pi-processes.
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant E as Extension
+    participant P as pi-processes
+    participant W as Worker
+    participant B as Beads
+
+    A->>E: /beads:run (or auto-advance)
+    E->>B: bd list --assignee:worker --status open
+    B-->>E: [task-57, task-58]
+    
+    loop For each ready task
+        E->>B: bd label add task-N claim:1
+        E->>P: process start "pi -p 'work on task-N...'"
+        P-->>E: pid registered
+        E->>B: bd update task-N -s in_progress
+    end
+    
+    Note over W: Worker executes task...
+    
+    W->>P: exit (code 0 or 1)
+    P->>E: alertOnSuccess / alertOnFailure
+    E->>A: "Worker for task-57 exited. Check results."
+    
+    Note over A: Agent evaluates and decides
+    A->>B: bd close task-57 --reason "completed"
+```
+
+Worker spawning details:
+- Each worker is a pi session with the beads-work skill loaded
+- Worker prompt includes: task ID, task description, epic context, session directory
+- `alertOnSuccess=true` and `alertOnFailure=true` — agent always gets a turn
+- Worker logs go to `.beads/sessions/<epic>/worker-<task>.log`
+- Claim tracking: increment `claim:N` label on each spawn attempt
+- Stuck detection: if `claim:N` exceeds threshold (default 3), mark task stuck
+
+#### 3. Tool Gates (`index.ts`)
+
+Intercepts executor/ralph script calls and redirects to extension.
+
+```typescript
+// Blocked patterns
+"beads-executor.sh"  → "Use /beads:run to spawn workers"
+"ralph.sh"           → "Use /beads:run to spawn workers and /beads:evaluate for evaluation"
+```
+
+This is a hard block via `tool_call` event handler. The agent sees the block reason and learns the correct alternative. The skills don't need modification — the extension overrides at the pi level.
+
+#### 4. Context Injection (`index.ts`)
+
+Adds orchestration rules to the system prompt via `before_agent_start`:
+
+```
+## Beads Execution Override
+
+Task execution is managed by the beads-command-center extension.
+- Do NOT run beads-executor.sh or ralph.sh directly.
+- Use /beads:run to spawn workers for ready tasks.
+- Use /beads to monitor progress.
+- When notified of worker completion, evaluate the output and decide:
+  close the task, reopen with feedback, or create remediation tasks.
+- Advance to the next phase when all tasks in current phase are done.
+- Surface human gates via the dashboard — don't ask the human to run bd commands.
+```
+
+#### 5. Dashboard UI (`components/`)
+
+Five UI surfaces:
+
+| Surface | Pi Primitive | Purpose |
+|---------|-------------|---------|
+| Status line | `setStatus()` | Always-visible epic + phase + progress |
+| Progress widget | `setWidget("beads-progress", ..., { placement: "aboveEditor" })` | Compact progress bar |
+| Human gate widget | `setWidget("beads-gates", ..., { placement: "belowEditor" })` | Pending human actions |
+| Epic panel | `registerCommand("beads")` + overlay | Full task dashboard |
+
+### Execution Flow
+
+#### Attended Mode (human present)
+
+```mermaid
+sequenceDiagram
+    participant H as Human
+    participant A as Agent
+    participant E as Extension
+    participant W as Workers
+    participant B as Beads
+
+    H->>A: "Start epic for auth refactor"
+    A->>B: bd create "Auth refactor" -t epic
+    A->>H: "Created epic-42. Let me plan."
+    
+    Note over A,H: Planning phase (interactive)
+    A->>A: Create PLAN.md
+    H->>A: "Looks good, approve"
+    A->>B: bd label add epic-42 plan-approved
+    
+    Note over A,H: Decomposition phase
+    A->>B: Create features + tasks
+    H->>A: "Start workers"
+    A->>E: /beads:run
+    
+    Note over E,W: Execution phase
+    E->>W: Spawn worker for task-57
+    E->>W: Spawn worker for task-58
+    E-->>A: Widget: "▶ 2 workers running"
+    
+    W->>E: task-57 worker exits
+    E->>A: "Worker for task-57 done. Evaluate."
+    A->>B: Read task state + worker log
+    A->>A: Tests pass? Files changed? Quality ok?
+    A->>B: bd close task-57 --reason "completed"
+    E-->>A: Widget: "■□ 1/2 tasks done"
+    
+    W->>E: task-58 worker exits (failure)
+    E->>A: "Worker for task-58 failed. Check output."
+    A->>B: Read worker log
+    A->>A: Diagnose failure
+    A->>B: bd comments add task-58 "[agent] Fix: missing import"
+    E->>W: Re-spawn worker for task-58 (claim:2)
+    
+    W->>E: task-58 worker exits (success)
+    E->>A: "Worker for task-58 done."
+    A->>B: bd close task-58
+    
+    Note over A,H: Evaluation phase
+    A->>A: All tasks done. Check evaluator criteria.
+    A->>A: Run tests, check coverage, verify auth flow
+    A->>H: "All criteria met. Epic complete."
+    A->>B: bd close epic-42 --reason completed
+```
+
+#### Unattended Mode (human away)
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant E as Extension
+    participant W as Workers
+    participant B as Beads
+
+    Note over A: Human kicked off /beads:run --auto
+    
+    loop Until all tasks done or stuck
+        E->>B: Find ready tasks
+        E->>W: Spawn workers
+        
+        loop For each worker completion
+            W->>E: Worker exits
+            E->>A: Check-in turn
+            A->>B: Evaluate task
+            
+            alt Task done
+                A->>B: Close task
+            else Task failed, retryable
+                A->>B: Add remediation comment
+                E->>W: Re-spawn (claim+1)
+            else Task stuck (max claims)
+                A->>B: Label stuck
+                E-->>A: Widget: "⚠ task-N stuck"
+            end
+        end
+        
+        A->>A: All tasks done? Evaluate criteria.
+        
+        alt Criteria met
+            A->>B: Close epic
+        else Criteria not met
+            A->>A: Create remediation tasks
+            Note over A: Next iteration
+        end
+    end
+    
+    alt Human gate hit
+        E-->>A: Widget: "⚠ needs human approval"
+        Note over A: Wait for human return
+    end
+```
+
+## Design Decisions
+
+### D1: Main session as orchestrator (not a separate process)
+
+**Decision:** The agent in the main pi session handles all orchestration logic — evaluation, phase advancement, remediation planning.
+
+**Alternatives considered:**
+- Keep ralph.sh as a separate process (status quo)
+- Build a new orchestrator daemon in TypeScript
+- Use pi subagents for orchestration
+
+**Rationale:** The main agent already has the richest context — it knows the epic plan, the human's preferences, the skill instructions, and the conversation history. Externalizing orchestration to a bash script throws all of this away. The agent can evaluate work quality far better than a mechanical script. The extension handles only what the agent can't: background process management and periodic polling.
+
+**Trade-off:** The main session's context window fills up over long epics. Mitigation: beads state is persistent (labels, comments). If context overflows, the agent can recover by reading beads state. The extension can also summarize completed tasks to reduce context pressure.
+
+### D2: Tool gates over skill modification
+
+**Decision:** Block `beads-executor.sh` and `ralph.sh` via `tool_call` event handler rather than modifying the skills.
+
+**Alternatives considered:**
+- Fork the beads/ralph skills with modified instructions
+- Add conditional logic in skills ("if extension loaded, use extension")
+- Remove executor references from skills entirely
+
+**Rationale:** Skills should be generic and reusable. The extension is the environment-specific override. This follows pi's layering: skills describe capabilities, extensions control how they're used. Other users of the beads skill (without this extension) still get the executor path. The tool gate is explicit, debuggable, and teaches the agent the correct alternative via the block reason.
+
+### D3: pi-processes for worker management
+
+**Decision:** Use the `process` tool (from `@aliou/pi-processes`) to spawn and manage workers.
+
+**Alternatives considered:**
+- Direct `child_process.spawn()` in the extension
+- `nohup` + PID files (current approach)
+- Custom process manager
+
+**Rationale:** pi-processes already handles everything we need: background spawning, log capture, alert-on-exit, process listing, and cleanup. The alert system (`alertOnSuccess`, `alertOnFailure`) is exactly the check-in mechanism we want — the agent gets a turn to react when a worker finishes. No need to build a custom process manager.
+
+### D4: Polling over file watchers
+
+**Decision:** Poll beads state via `bd` CLI commands on a timer (every 5 seconds) rather than using filesystem watchers.
+
+**Alternatives considered:**
+- `fs.watch()` on `.beads/` directory
+- inotify/kqueue watchers
+- Beads daemon events (if available)
+
+**Rationale:** Beads state is spread across git objects, not simple files. `bd` commands are the reliable interface. Polling every 5 seconds is cheap (a few `bd list` calls) and avoids the complexity of filesystem watchers on git-backed storage. The pi-processes alert system handles the latency-sensitive case (worker exit) — polling is only for state that changes via external `bd` commands.
+
+### D5: No forced hats
+
+**Decision:** Do not implement hat-based role switching. Let the model choose its approach naturally.
+
+**Alternatives considered:**
+- Grandpa Loop's 13-hat system
+- Configurable hat sequences per task
+- Hat rotation with emit-based transitions
+
+**Rationale:** The model already knows when to plan, code, test, and review from the skill instructions. Forcing hat sequences adds rigidity without clear benefit. If observability into the model's "phase" is needed, it can be inferred from tool calls (editing = coding, running tests = testing, reading skills = planning) rather than forcing explicit transitions. This avoids the "enterprise framework" trap.
+
+### D6: Critic as fresh separate session
+
+**Decision:** Evaluation is done by a fresh pi session (critic) spawned via pi-processes, not inline by the orchestrator.
+
+**Alternatives considered:**
+- Inline evaluation by the main agent (biased by prior context)
+- Keep ralph's critic subagent pattern (bash-managed, no extension integration)
+- Skip evaluation entirely (trust workers)
+
+**Rationale:** The main agent has been involved in research, planning, and orchestration. It's primed to think the work is good. A fresh critic session starts with zero conversation history and evaluates purely on output quality against the `[evaluator]` criteria. This eliminates confirmation bias. The critic writes a structured `[critic]` comment to beads and exits. The orchestrator reads the verdict and decides next steps. The critic can use a cheaper model (`criticModel` setting) since evaluation is simpler than generation.
+
+### D8: Research-first phase model
+
+**Decision:** Enforce a research phase before planning. The phase pipeline is: research → purpose → plan → decompose → work → evaluate.
+
+**Alternatives considered:**
+- Jump straight to planning (status quo)
+- Optional research (agent decides)
+- Research as part of planning
+
+**Rationale:** Research is the highest-leverage phase. Wrong assumptions in research propagate through planning, decomposition, and implementation — causing rework. Making research explicit and mandatory (with a `research-done` gate) ensures the agent asks questions, fetches context, and validates assumptions before committing to a plan. The widget shows blocked phases as dimmed, making the flow self-documenting — users understand the protocol without tribal knowledge.
+
+### D7: Widget as glanceable summary, overlay as command center
+
+**Decision:** Persistent widgets show status only (not interactive). Overlays handle all interaction.
+
+**Rationale:** Pi widgets (`setWidget`) don't support input handling — they're render-only. The pattern is: widget shows state, user types command to interact. This matches pi-processes' dock pattern and keeps the UI simple. The widget is the "glance," the overlay is the "deep dive."
+
+## Comparison: Extension vs. Existing Skills
+
+| Aspect | beads-executor + ralph | beads-command-center extension |
+|--------|----------------------|--------------------------|
+| **Orchestration** | Bash scripts (mechanical) | Main agent (intelligent) |
+| **Visibility** | Tail log files manually | Real-time TUI widgets + overlays |
+| **Evaluation** | Separate critic subagent | Agent evaluates inline |
+| **Human gates** | Execution pauses silently | Widget surfaces pending actions |
+| **Worker management** | Manual PID tracking | pi-processes with alerts |
+| **Recovery** | Read labels, restart script | Agent reads beads state, resumes |
+| **Iteration loop** | ralph.sh bash loop | Agent-driven check-in cycle |
+| **Skill changes needed** | None | None (tool gates redirect) |
+| **Process count** | 3+ (main + executor + ralph + workers) | 1 + workers (main session + extension) |
+| **Context for decisions** | None (bash has no context) | Full conversation + epic + skills |
+| **Cost per evaluation** | Full model call (critic subagent) | Part of existing agent turn |
+
+## File Structure
+
+```
+~/.pi/packages/beads-command-center/
+├── package.json              # Pi package manifest
+├── README.md                 # User-facing documentation
+├── DESIGN.md                 # This document
+├── index.ts                  # Extension entry: events, commands, gates, prompts
+├── lib/
+│   ├── beads.ts              # Beads state reader (bd CLI wrapper)
+│   └── poller.ts             # State change detection + notifications
+└── components/
+    └── widgets.ts            # Phase pipeline, status, gates, panels, task detail
+```
+
+## Commands Reference
+
+| Command | Phase | Description |
+|---------|-------|-------------|
+| `/beads` | any | Open epic dashboard overlay |
+| `/beads:research` | research | Start research phase — agent asks questions, fetches context |
+| `/beads:plan` | plan | Start plan phase (requires `research-done`) |
+| `/beads:run` | work | Spawn workers for ready tasks |
+| `/beads:evaluate` | evaluate | Spawn fresh critic session |
+| `/beads:task <id>` | any | Open task detail overlay |
+| `/beads:approve` | plan | Approve pending plan (adds `plan-approved` label) |
+| `/beads:comment <id> <text>` | any | Add `[human]` comment to task |
+| `/beads:stop` | work | Kill all workers, pause execution |
+| `/beads:resume` | work | Resume — re-spawn workers for ready tasks |
+
+## Future Considerations
+
+- **Context summarization** — When the main session's context fills up, auto-summarize completed tasks and inject the summary. Beads comments serve as persistent memory.
+- **Multi-epic support** — Dashboard can show multiple epics. Status line cycles or shows the active one.
+- **Worker skill loading** — Workers could load different skill sets based on task type (e.g., `amelia-build` for build tasks, `amelia-logs` for log analysis).
+- **Metrics collection** — Track time-per-task, claims-per-task, iterations-per-epic for tuning insights.
+- **Dependency graph visualization** — ASCII DAG of task dependencies in an overlay.
+- **Remote workers** — Spawn workers on remote machines via SSH for hardware-dependent tasks (e.g., Amelia device testing).
+
+## TODO / Next Steps
+
+Items for a follow-up agent to pick up. Ordered roughly by impact.
+
+### P0 — Test & Harden
+
+- [ ] End-to-end test: create epic, run through all phases, verify widget updates at each transition
+- [ ] Test tool gates: confirm `beads-executor.sh` and `ralph.sh` are blocked with correct redirect messages
+- [ ] Test poller: verify notifications fire on task completion, stuck detection, human gate changes
+- [ ] Test critic spawn: verify fresh session has no prior context, writes `[critic]` comment, exits cleanly
+- [ ] Handle edge cases: no `.beads/` dir, `bd` not installed, epic with no tasks, worker crash mid-task
+- [ ] Verify `questionnaire` tool works during research phase for structured clarifying questions
+
+### P1 — UI Enhancements
+
+- [ ] **Vertical tab layout for `/beads` overlay** — Render phases as vertical tabs on the left side, active phase's detail (tasks, comments, criteria) on the right. Similar to questionnaire's tab bar but vertical. User navigates phases with j/k, sees contextual detail per phase:
+  ```
+  ┌─ auth-refactor ────────────────────────────────────────┐
+  │ ✓ research  │ Tasks (4/7)                              │
+  │ ✓ purpose   │  ■ setup JWT middleware                  │
+  │ ✓ plan      │  ■ add token validation                  │
+  │ ✓ decompose │  ▶ fix auth middleware (claim:1)         │
+  │ ▶ work      │  □ session store impl                    │
+  │ ░ evaluate  │  □ rate limit config                     │
+  │             │  □ rate limit tests                      │
+  │             │  □ integration tests                     │
+  │             │                                          │
+  │             │ Active: fix-auth-middleware               │
+  │             │ Worker PID: 42351                         │
+  └─────────────┴──────────────────────────────────────────┘
+  ```
+- [ ] **Phase-specific detail panels** — When selecting a phase in the vertical tab:
+  - research: show RESEARCH.md summary, open questions count
+  - purpose: show PURPOSE section preview
+  - plan: show PLAN.md summary, approval status
+  - decompose: show feature/task tree
+  - work: show task list with worker status, progress bar
+  - evaluate: show evaluator criteria checklist with pass/fail, critic history
+- [ ] **Interactive task selection in `/beads` overlay** — j/k to select tasks, enter to open `/beads:task` detail, x to mark stuck, c to add comment inline
+- [ ] **Scrollable overlays** — For epics with many tasks, add scroll support (J/K for page up/down)
+- [ ] **Color-coded phase transitions** — Brief animation or highlight when a phase completes (flash green)
+- [ ] **Compact mode** — Single-line widget for narrow terminals: `✓✓✓✓▶○ 4/7`
+
+### P2 — Orchestration Improvements
+
+- [ ] **Auto-advance mode** — When `autoAdvance: true`, extension automatically spawns workers after decompose, spawns critic after all tasks done, creates remediation tasks after failed evaluation. Human only intervenes on gates.
+- [ ] **Worker wrapper script** — Instead of raw `pi -p`, spawn via a wrapper that: sets up beads context, captures exit status, writes `.beads/sessions/<epic>/worker-<task>.status` with exit code + last 50 lines. Orchestrator reads status file during check-in for reliable evaluation even if worker crashed.
+- [ ] **Claim escalation** — After N failed claims, auto-escalate: change `assignee:worker` to `assignee:human`, notify via widget
+- [ ] **Parallel worker limits** — Setting for max concurrent workers (default: 3). Queue excess tasks.
+- [ ] **Worker timeout** — Kill workers that exceed a configurable time limit per task
+- [ ] **Critic model selection** — Use `criticModel` setting to spawn critic with a different (potentially cheaper) model
+- [ ] **Iteration history in overlay** — Show past iteration results: which criteria passed/failed per iteration, what remediation was done
+
+### P3 — Research Phase Enhancements
+
+- [ ] **Structured research template** — `/beads:research` creates RESEARCH.md with pre-filled sections (Problem Statement, Current State, Findings, Constraints, Open Questions, Assumptions) so the agent fills in rather than free-forms
+- [ ] **Auto-context gathering** — During research, agent automatically: reads relevant code (`my code search`), searches wiki (`my wiki search`), checks existing patterns. Extension could suggest searches based on epic title.
+- [ ] **Research completeness check** — Before allowing `research-done`, verify RESEARCH.md has all required sections filled, open questions are resolved, assumptions are flagged
+- [ ] **Questionnaire integration** — Agent uses `questionnaire` tool to ask structured clarifying questions during research. Extension could suggest common question patterns based on epic type.
+
+### P4 — Artifact & Reporting
+
+- [ ] **Epic summary generation** — On epic completion, auto-generate a summary doc in `docs/<epic>/SUMMARY.md` with: timeline, iterations, key decisions, final critic verdict
+- [ ] **Diff report** — Show what files changed across all tasks in the epic
+- [ ] **Time tracking** — Record phase durations, task durations, iteration counts. Surface in `/beads` overlay.
+- [ ] **Export** — `/beads:export` generates a standalone markdown report of the epic for sharing

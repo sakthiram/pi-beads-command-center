@@ -1,0 +1,5 @@
+{
+  "maxIterations": 20,
+  "maxConcurrentWorkers": 10,
+  "workerTimeout": 3600
+}

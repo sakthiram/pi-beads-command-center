@@ -1,0 +1,8 @@
+{
+  "name": "beads-command-center",
+  "version": "0.1.0",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
