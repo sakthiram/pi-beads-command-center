@@ -112,7 +112,17 @@ export class Poller {
         }
 
         // Epic reopen — status changed back from closed to open
+        // Strip stale critic-satisfied label so evaluation gate isn't bypassed
         if (prev.epic.status === "closed" && state.epic.status !== "closed") {
+          if (state.epic.labels.includes("critic-satisfied")) {
+            try {
+              const { execSync } = require("child_process");
+              execSync(`bd label remove ${state.epic.id} critic-satisfied --no-daemon`, {
+                cwd: this.cwd,
+                stdio: "ignore",
+              });
+            } catch {}
+          }
           this.callbacks.onStateChanged(state, counts);
         }
 
