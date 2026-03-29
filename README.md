@@ -133,13 +133,47 @@ The evaluate phase spawns a fresh pi session for the critic. The main session ha
 - Evaluates purely on output quality
 - Can use a different model (`criticModel` setting)
 
-### Tool Gates
+### Tool Gates & Guardrails
 
-The extension blocks direct execution of old orchestration scripts:
-- `beads-executor.sh` → blocked, redirects to `/beads:run`
-- `ralph.sh` → blocked, redirects to extension commands
+The extension enforces workflow integrity through 8 tool gates — `tool_call` event handlers that intercept commands before they execute and block violations with actionable error messages. This is the killer feature of pi's extension API.
+
+| # | Gate | Trigger | Block Reason |
+|---|------|---------|-------------|
+| 1 | **Script redirect** | `beads-executor.sh` in bash | Use `/beads:run` instead |
+| 2 | **Script redirect** | `ralph.sh` in bash | Use extension commands instead |
+| 3 | **Epic-first** | `bd create` without `-t epic` when no epic exists | Create an epic first |
+| 4 | **Single epic** | `bd create -t epic` when epic already active | One epic per session |
+| 5 | **Critic gate** | `bd close <epic>` without `critic-satisfied` label | Spawn critic via `/beads:evaluate` first |
+| 6 | **Critic integrity** | `bd label add ... critic-satisfied` | Only the critic session can add this label — respawn critic instead |
+| 7 | **Plan approval** | `bd label add ... plan-approved` without human approval | Human must run `/beads:approve` |
+| 8 | **No direct work** | `write` or `edit` on non-docs files during work phase | You're the orchestrator — spawn a worker |
+
+Gates 5 and 6 work together as a two-layer defense: the orchestrator cannot close the epic without critic evaluation (gate 5), AND it cannot bypass that by self-labeling `critic-satisfied` (gate 6). The only path is spawning a fresh critic session that independently decides whether to add the label.
 
 Skills don't need modification — the extension overrides at the pi level.
+
+### Why Pi: Building Applications on Top of a Coding Agent
+
+Other coding agent tools have hooks too. Claude Code has `PreToolUse`, `PostToolUse`, and `Stop`. Kiro CLI has lifecycle events. Most tools let you inject system prompts and define custom slash commands.
+
+The difference isn't any single hook — it's how easily they compose into an application.
+
+This extension uses 13 distinct pi APIs in a single file. Event hooks feed into shared state. Tool gates read that state to make decisions. Widgets render it. Commands mutate it. Messages trigger new agent turns based on it. Everything stacks:
+
+- `session_start` discovers the active epic and initializes shared state
+- `before_agent_start` injects the orchestration protocol into the system prompt every turn — the agent always knows the rules, even after compaction
+- `tool_call` handlers read shared state to enforce 8 different gates — blocking commands, redirecting to correct alternatives, preventing role violations
+- `tool_result` reacts after execution to detect epic creation mid-session and start tracking
+- `sendMessage` with `triggerTurn: true` injects follow-up messages that kick the agent into action — "all tasks done, run evaluation" — without human intervention
+- `setWidget` renders live phase pipeline and human gate alerts, reading from the same shared state the gates use
+- `setFooter`, `setStatus`, `notify` provide layered feedback at different urgency levels
+- `custom()` overlays give full interactive dashboards when you need the deep dive
+- `setEditorText` pre-loads the right prompt for the current phase — remediation instructions, research questions, plan templates
+- `registerCommand` (×10) gives the human direct control at every phase boundary
+
+All of this lives in one `index.ts`. No build step, no plugin manifest, no separate process. Drop the file in `~/.pi/packages/`, load it with `-e`, and you have a full orchestration harness with phase enforcement, role separation, unbiased evaluation, and human gates.
+
+The stacking is what matters. Any tool can add a pre-tool hook. But can you read shared extension state inside that hook, block the command, surface the reason in a widget, inject a corrective message that triggers a new agent turn, and have the agent self-correct — all without the human typing anything? That's what makes this a 600-line application instead of a 600-line config file.
 
 ## Artifact Organization
 

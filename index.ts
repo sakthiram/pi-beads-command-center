@@ -151,6 +151,14 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // Block orchestrator from self-labeling critic-satisfied — only the critic session may add this label
+      if (cmd.includes("critic-satisfied") && cmd.includes("bd label add")) {
+        return {
+          block: true,
+          reason: "Only the critic session can add the critic-satisfied label. You are the orchestrator — you cannot mark your own work as satisfactory. If the critic didn't add the label, respawn the critic via /beads:evaluate. Do NOT attempt to add this label yourself.",
+        };
+      }
+
       // Block agent from self-approving plan (unless human triggered via /beads:approve)
       if (settings.strictPlanApproval && cmd.includes("plan-approved") && cmd.includes("bd label add")) {
         if (!state.epic.labels.includes("plan-approved") && !planApprovedByHuman) {
@@ -192,8 +200,21 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     widgetCtx = ctx;
 
+    // Replace default footer — only render extension statuses (stackable)
+    ctx.ui.setFooter((_tui, theme, footerData) => ({
+      dispose: () => {},
+      invalidate() {},
+      render(width: number): string[] {
+        const statuses = footerData.getExtensionStatuses();
+        if (statuses.size === 0) return [];
+        const parts = Array.from(statuses.values());
+        const line = theme.fg("dim", ` ${parts.join("  ")}`);
+        return [truncateToWidth(line, width)];
+      },
+    }));
+
     // Register widgets once — they read from mutable state
-    ctx.ui.setWidget("beads-pipeline", (_tui: any, _theme: any) => {
+    ctx.ui.setWidget("beads-pipeline", (_tui: any, theme: any) => {
       return {
         render(w: number): string[] {
           if (currentPipelineLines.length === 0) return [];
@@ -201,14 +222,14 @@ export default function (pi: ExtensionAPI) {
             const truncated = truncateToWidth(line, w - 2);
             const visible = visibleWidth(truncated);
             const pad = Math.max(0, w - visible - 1);
-            return `\x1b[48;2;30;30;50m ${truncated}${" ".repeat(pad)}\x1b[49m`;
+            return theme.bg("customMessageBg", ` ${truncated}${" ".repeat(pad)}`);
           });
         },
         invalidate() {},
       };
     });
 
-    ctx.ui.setWidget("beads-gates", (_tui: any, _theme: any) => {
+    ctx.ui.setWidget("beads-gates", (_tui: any, theme: any) => {
       return {
         render(w: number): string[] {
           if (currentGateLines.length === 0) return [];
@@ -216,7 +237,7 @@ export default function (pi: ExtensionAPI) {
             const truncated = truncateToWidth(line, w - 2);
             const visible = visibleWidth(truncated);
             const pad = Math.max(0, w - visible - 1);
-            return `\x1b[48;2;50;35;10m ${truncated}${" ".repeat(pad)}\x1b[49m`;
+            return theme.bg("toolPendingBg", ` ${truncated}${" ".repeat(pad)}`);
           });
         },
         invalidate() {},
@@ -740,4 +761,5 @@ Each phase must complete before the next unlocks. The widget shows blocked phase
 - Human artifacts go in \`docs/<epic-name>/\` (committable).
 - Machine artifacts go in \`.beads/sessions/<epic>/\` (ephemeral).
 - Surface human gates via the dashboard — don't ask the human to run \`bd\` commands.
+- **NEVER add the \`critic-satisfied\` label yourself.** Only the critic session (spawned via \`/beads:evaluate\`) can add this label. If the critic exited without adding it, the evaluation failed — respawn the critic via \`/beads:evaluate\`. Do NOT work around this by adding the label manually.
 `;
