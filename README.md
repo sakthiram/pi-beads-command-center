@@ -133,6 +133,27 @@ The evaluate phase spawns a fresh pi session for the critic. The main session ha
 - Evaluates purely on output quality
 - Can use a different model (`criticModel` setting)
 
+### Iteration Lifecycle
+
+There are two paths to a new iteration:
+
+**Remediate (critic rejects):** The critic finds failures and writes a `[critic]` comment without adding `critic-satisfied`. The orchestrator reads the feedback, creates remediation tasks (only for failed criteria), labels them `assignee:worker`, and advances the iteration label (`iteration:1` → `iteration:2`). Workers fix the issues, then a fresh critic evaluates again. This loops until the critic passes or `maxIterations` is hit.
+
+**Reopen (new work on completed epic):** The epic was closed with `critic-satisfied` from a prior run. The human reopens it (`bd reopen`) and adds new tasks. On reopen, the extension automatically strips the stale `critic-satisfied` label so the evaluation gate isn't bypassed. The phase pipeline resets to reflect the new open tasks.
+
+In both cases, the open/closed status of tasks is the signal — not iteration-scoped labels on tasks. Old iteration tasks are closed, current iteration tasks are open. The `iteration:N` label on the epic tracks which loop you're in.
+
+**Label lifecycle across iterations:**
+
+| Label | Added by | Stripped when | Purpose |
+|-------|----------|--------------|--------|
+| `iteration:N` | Remediate prompt | Remediate prompt (replaced with N+1) | Track which loop |
+| `critic-satisfied` | Critic session (only on pass) | Automatically on epic reopen | Evaluation gate |
+| `plan-approved` | Human via `/beads:approve` | Never (persists) | Plan gate |
+| `research-done` | Orchestrator | Never (persists) | Research gate |
+
+**Defense in depth:** Even if label cleanup fails, the phase widget and close gate both require `allTasksDone AND critic-satisfied` — a stale label alone can't bypass the evaluation gate while new tasks are still open.
+
 ### Tool Gates & Guardrails
 
 The extension enforces workflow integrity through 8 tool gates — `tool_call` event handlers that intercept commands before they execute and block violations with actionable error messages. This is the killer feature of pi's extension API.
